@@ -31,6 +31,9 @@ else
 fi
 
 echo "==> building the app ($PROFILE)"
+# The app's package manifest reads this to find the core library, so that a
+# debug build links the debug library and a release build the release one.
+export FUZZYLITE_CORE_DIR="$LIB_DIR"
 swift build --package-path "$APP" -c "$PROFILE"
 
 # SwiftPM caches the link step, so the binary is relinked when the core has

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
 #[cfg(target_os = "macos")]
 mod sys {
@@ -334,15 +334,24 @@ impl Watcher {
         let (tx, rx) = unbounded();
         let stop = Arc::new(AtomicBool::new(false));
 
+        // The watcher signals that it is running through this channel, so
+        // that the caller does not create a file before the stream is
+        // delivering events.
+        let (ready_tx, ready_rx) = bounded(1);
+
         let stop_thread = Arc::clone(&stop);
         let watch_path = path.to_path_buf();
 
         let handle = std::thread::Builder::new()
             .name("fuzzylite-watch".into())
             .spawn(move || {
-                run_watch_loop(&watch_path, tx, stop_thread);
+                run_watch_loop(&watch_path, tx, stop_thread, Some(ready_tx));
             })
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        // The wait is bounded, so that a watcher whose stream cannot be
+        // created does not block the caller forever.
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
 
         Ok(Self {
             rx,
@@ -384,7 +393,12 @@ impl Watcher {
 }
 
 #[cfg(target_os = "macos")]
-fn run_watch_loop(path: &Path, tx: Sender<Change>, stop: Arc<AtomicBool>) {
+fn run_watch_loop(
+    path: &Path,
+    tx: Sender<Change>,
+    stop: Arc<AtomicBool>,
+    ready_tx: Option<Sender<()>>,
+) {
     // The context must outlive the stream, so it is kept in this scope.
     let mut context = Box::new(CallbackContext { sender: tx });
     let context_ptr: *mut CallbackContext = &mut *context;
@@ -477,6 +491,13 @@ fn run_watch_loop(path: &Path, tx: Sender<Change>, stop: Arc<AtomicBool>) {
 
     unsafe {
         sys::FSEventStreamStart(stream);
+    }
+
+    // The watcher tells the caller that it is running now. Without this,
+    // a file that is created right after the watcher is started can be
+    // missed, because the stream is not delivering events yet.
+    if let Some(ready) = &ready_tx {
+        let _ = ready.send(());
     }
 
     // Pump the run loop until the watcher is asked to stop. A short timeout

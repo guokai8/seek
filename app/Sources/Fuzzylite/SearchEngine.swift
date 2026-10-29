@@ -136,6 +136,116 @@ final class SearchEngine: @unchecked Sendable {
         path.withCString { fl_engine_save_snapshot(handle, $0) == 0 }
     }
 
+    // MARK: - Watching
+
+    /// A change to the filesystem.
+    struct FileChange {
+        /// The path that changed.
+        let path: String
+
+        /// The kind of change.
+        enum Kind: Int {
+            case created = 0
+            case modified = 1
+            case removed = 2
+
+            /// The change could not be described precisely, so the subtree
+            /// has to be rescanned.
+            case unknown = 3
+        }
+
+        let kind: Kind
+
+        /// Whether the entry is a directory.
+        let isDirectory: Bool
+    }
+
+    /// Starts watching the configured roots for changes.
+    @discardableResult
+    func startWatching() -> Bool {
+        fl_engine_start_watch(handle) == 0
+    }
+
+    /// Collects the changes the watchers have reported.
+    func pollChanges() -> [FileChange] {
+        // The buffer holds the records, each of which is terminated by a
+        // null byte. A kilobyte is enough for a batch of changes.
+        let capacity = 16 * 1024
+        var buffer = [CChar](repeating: 0, count: capacity)
+
+        let found = buffer.withUnsafeMutableBufferPointer { pointer in
+            fl_engine_poll_changes(handle, pointer.baseAddress, Int32(capacity))
+        }
+
+        guard found > 0 else { return [] }
+
+        // The records are packed one after another, each ending with a null
+        // byte, so they are read out of the buffer as C strings.
+        var changes: [FileChange] = []
+        var offset = 0
+
+        while offset < capacity {
+            let bytes = buffer[offset...]
+            guard let terminator = bytes.firstIndex(of: 0) else { break }
+
+            let record = String(
+                decoding: buffer[offset..<offset + terminator].map { UInt8(bitPattern: $0) },
+                as: UTF8.self
+            )
+            offset += terminator + 1
+
+            let fields = record.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count == 3,
+                  let kind = FileChange.Kind(rawValue: Int(fields[0]) ?? 3),
+                  let isDirectory = Int(fields[1])
+            else { continue }
+
+            changes.append(
+                FileChange(
+                    path: String(fields[2]),
+                    kind: kind,
+                    isDirectory: isDirectory != 0
+                )
+            )
+        }
+
+        return changes
+    }
+
+    /// Applies a batch of changes to the index.
+    @discardableResult
+    func applyChanges(_ changes: [FileChange]) -> Int {
+        guard !changes.isEmpty else { return count }
+
+        // The path strings have to outlive the call, so they are copied into
+        // heap buffers that are freed once the call has returned.
+        var cStrings: [UnsafeMutablePointer<CChar>] = []
+        cStrings.reserveCapacity(changes.count)
+
+        defer {
+            for pointer in cStrings {
+                free(pointer)
+            }
+        }
+
+        var raw = [FlFileChange](
+            repeating: FlFileChange(path: nil, kind: 0, is_dir: 0),
+            count: changes.count
+        )
+
+        return raw.withUnsafeMutableBufferPointer { buffer in
+            for (index, change) in changes.enumerated() {
+                guard let pointer = strdup(change.path) else { continue }
+                cStrings.append(pointer)
+                buffer[index].path = UnsafePointer(pointer)
+                buffer[index].kind = Int32(change.kind.rawValue)
+                buffer[index].is_dir = change.isDirectory ? 1 : 0
+            }
+
+            return Int(fl_engine_apply_changes(handle, buffer.baseAddress, Int32(buffer.count)))
+        }
+    }
+
     // MARK: - Searching
 
     /// Runs a query and returns the ranked results.

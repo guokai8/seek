@@ -52,6 +52,9 @@ final class AppModel: ObservableObject {
     /// The task that builds the index.
     private var indexingTask: Task<Void, Never>?
 
+    /// The task that applies the changes the filesystem watcher reports.
+    private var watchingTask: Task<Void, Never>?
+
     /// The generation counter, used to discard results that arrive after a
     /// newer query has been issued.
     private var generation: UInt64 = 0
@@ -65,6 +68,7 @@ final class AppModel: ObservableObject {
     deinit {
         pendingSearch?.cancel()
         indexingTask?.cancel()
+        watchingTask?.cancel()
     }
 
     // MARK: - Configuration
@@ -129,6 +133,46 @@ final class AppModel: ObservableObject {
 
             await self?.finishIndexing(count: count)
         }
+
+        startWatching()
+    }
+
+    /// Starts the filesystem watcher and keeps the index up to date.
+    ///
+    /// The watcher reports the changes to the indexed roots, which are
+    /// applied to the index so that a file created after the launch shows
+    /// up without a restart.
+    private func startWatching() {
+        let engine = self.engine
+
+        guard engine.startWatching() else { return }
+
+        watchingTask = Task.detached(priority: .background) { [weak self] in
+            while !Task.isCancelled {
+                let changes = await Task.detached(priority: .background) {
+                    engine.pollChanges()
+                }.value
+
+                if !changes.isEmpty {
+                    let count = engine.applyChanges(changes)
+                    await self?.indexChanged(count: count)
+                }
+
+                // The watcher batches its events, so there is no point in
+                // asking more often than this.
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+        }
+    }
+
+    /// Publishes an index update that came from the watcher.
+    private func indexChanged(count: Int) {
+        indexedCount = count
+        updateStatus()
+
+        // The results are recomputed, because the new entries may match the
+        // current query.
+        scheduleSearch()
     }
 
     /// Publishes the result of the scan.

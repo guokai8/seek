@@ -7,6 +7,7 @@
 //
 
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 @main
@@ -55,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // bar, which is what a launcher should look like.
         NSApp.setActivationPolicy(.accessory)
 
+        requestAccessibilityIfNeeded()
         installHotkey()
         installFocusMonitor()
 
@@ -86,6 +88,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Hotkey
+
+    /// Asks for the accessibility permission that the hotkey needs.
+    ///
+    /// macOS only lets an app watch the keyboard globally once the user has
+    /// granted it accessibility access. Without the permission the hotkey
+    /// silently does nothing, so the prompt is shown once at launch rather
+    /// than leaving the user with a key that does not work.
+    private func requestAccessibilityIfNeeded() {
+        // The key is a documented constant of the accessibility API. It is
+        // spelled out here because the global it comes from is not safe to
+        // touch from Swift's concurrency checks.
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+
+        guard !trusted else { return }
+
+        // The prompt is a system dialog; the app waits for the user to
+        // answer it before installing the monitor.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.installHotkey()
+        }
+    }
 
     /// Installs the global `Cmd+Space` hotkey.
     private func installHotkey() {

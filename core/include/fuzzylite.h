@@ -136,6 +136,41 @@ char *fl_engine_default_snapshot_path(void);
 /* Returns 1 when a snapshot exists at `path`, 0 when it does not. */
 int fl_snapshot_exists(const char *path);
 
+/*
+ * A change to the filesystem, reported to the engine by the watcher.
+ */
+typedef struct {
+    /* The path that changed. */
+    const char *path;
+    /* The kind of change: 0 created, 1 modified, 2 removed, 3 unknown. */
+    int kind;
+    /* Whether the entry is a directory. */
+    int is_dir;
+} FlFileChange;
+
+/*
+ * Applies a batch of filesystem changes to the index. The corpus is rebuilt
+ * afterwards, so that the searches see the new entries. Returns the number
+ * of entries in the index, or -1 on failure.
+ */
+int fl_engine_apply_changes(FlEngine *engine,
+                            const FlFileChange *changes,
+                            int count);
+
+/*
+ * Starts watching the engine's roots for changes. Returns 0 on success, -1
+ * on failure.
+ */
+int fl_engine_start_watch(FlEngine *engine);
+
+/*
+ * Collects the changes the watchers have reported. The changes are written
+ * into `out` as records of the form "kind<TAB>is_dir<TAB>path", one after
+ * another, each terminated by a null byte. Returns the number of changes
+ * written, or -1 on failure.
+ */
+int fl_engine_poll_changes(FlEngine *engine, char *out, int capacity);
+
 #ifdef __cplusplus
 }
 #endif

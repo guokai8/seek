@@ -14,8 +14,10 @@
 //! # Threading
 //!
 //! All functions are safe to call from any thread. The engine keeps its
-//! state behind a mutex, so a search on the main thread cannot observe a
-//! half-applied index update.
+//! state behind a reader-writer lock: the searches take the read lock, and
+//! the operations that change the index take the write lock. A search that
+//! runs while the index is being rebuilt cannot observe a half-applied
+//! update.
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -51,6 +53,8 @@ pub struct Inner {
     pub options: SearchOptions,
     /// A background scanner, when one is running.
     pub scanner: Option<Scanner>,
+    /// The filesystem watchers, one per root.
+    pub watchers: Vec<crate::watch::Watcher>,
 }
 
 impl Engine {
@@ -62,6 +66,7 @@ impl Engine {
                 roots: Vec::new(),
                 options: SearchOptions::default(),
                 scanner: None,
+                watchers: Vec::new(),
             }),
         }
     }
@@ -522,4 +527,213 @@ pub unsafe extern "C" fn fl_string_free(s: *mut c_char) {
 pub extern "C" fn fl_version() -> *const c_char {
     // "0.1.0\0"
     b"0.1.0\0".as_ptr() as *const c_char
+}
+
+/// A change to the filesystem, reported to the engine by the watcher.
+///
+/// The struct is passed by pointer and filled in by the Swift side.
+#[repr(C)]
+pub struct FileChange {
+    /// The path that changed.
+    pub path: *const c_char,
+    /// The kind of change: 0 created, 1 modified, 2 removed.
+    pub kind: c_int,
+    /// Whether the entry is a directory.
+    pub is_dir: c_int,
+}
+
+/// Applies a batch of filesystem changes to the index.
+///
+/// The changes are the ones the watcher reported since the last call. They
+/// are applied under the write lock, and the corpus is rebuilt afterwards so
+/// that the searches see the new entries.
+///
+/// Returns the number of entries in the index, or -1 on failure.
+///
+/// # Safety
+///
+/// `changes` must point to a buffer of at least `count` entries, and every
+/// `path` in it must be a valid null-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn fl_engine_apply_changes(
+    engine: *mut Engine,
+    changes: *const FileChange,
+    count: c_int,
+) -> c_int {
+    if engine.is_null() || changes.is_null() || count < 0 {
+        return -1;
+    }
+    let eng = unsafe { &*engine };
+
+    // The changes are decoded before the lock is taken, because the path
+    // strings have to be copied out anyway.
+    let mut decoded: Vec<(std::path::PathBuf, u8, bool)> = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let change = unsafe { &*changes.add(i) };
+        if change.path.is_null() {
+            continue;
+        }
+        let Ok(text) = CStr::from_ptr(change.path).to_str() else {
+            continue;
+        };
+        decoded.push((
+            std::path::PathBuf::from(text),
+            change.kind as u8,
+            change.is_dir != 0,
+        ));
+    }
+
+    let mut inner = eng.write();
+
+    let mut changed = false;
+    for (path, kind, is_dir) in decoded {
+        match kind {
+            // Removed.
+            2 => {
+                if inner.index.remove(&path) {
+                    changed = true;
+                }
+            }
+            // Created or modified.
+            _ => {
+                let metadata = std::fs::metadata(&path).ok();
+                let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                let entry_kind = if is_dir {
+                    EntryKind::Directory
+                } else {
+                    EntryKind::File
+                };
+
+                if inner.index.upsert(&path, entry_kind, size, modified).is_some() {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        inner.corpus = Corpus::build(&inner.index);
+        inner.index.touch();
+    }
+
+    inner.index.live_len() as c_int
+}
+
+/// Starts watching the engine's roots for changes.
+///
+/// The watcher runs on its own thread. The changes it reports are applied
+/// with [`fl_engine_apply_changes`].
+///
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn fl_engine_start_watch(engine: *mut Engine) -> c_int {
+    if engine.is_null() {
+        return -1;
+    }
+    let eng = unsafe { &*engine };
+    let roots = eng.read().roots.clone();
+
+    if roots.is_empty() {
+        return -1;
+    }
+
+    // One watcher per root, each on its own thread. The channels are
+    // collected so that the changes can be drained.
+    let mut watchers = Vec::new();
+    for root in &roots {
+        match crate::watch::Watcher::new(root) {
+            Ok(w) => watchers.push(w),
+            Err(_) => continue,
+        }
+    }
+
+    if watchers.is_empty() {
+        return -1;
+    }
+
+    eng.write().watchers = watchers;
+    0
+}
+
+/// Collects the changes the watchers have reported.
+///
+/// The changes are written into a caller-provided buffer as newline
+/// separated records of the form `kind<TAB>is_dir<TAB>path`.
+///
+/// Returns the number of changes written, or -1 on failure.
+///
+/// # Safety
+///
+/// `out` must point to a buffer of at least `capacity` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fl_engine_poll_changes(
+    engine: *mut Engine,
+    out: *mut c_char,
+    capacity: c_int,
+) -> c_int {
+    if engine.is_null() || out.is_null() || capacity <= 0 {
+        return -1;
+    }
+    let eng = unsafe { &*engine };
+
+    // The lock is held while the changes are drained. The drain does not
+    // block: the watchers are asked for a change with a zero timeout.
+    let inner = eng.write();
+
+    let mut records: Vec<String> = Vec::new();
+    for watcher in &inner.watchers {
+        while let Some(change) = watcher.next_change_timeout(std::time::Duration::from_millis(0)) {
+            let kind = match change.kind {
+                crate::watch::ChangeKind::Created => 0,
+                crate::watch::ChangeKind::Modified => 1,
+                crate::watch::ChangeKind::Removed => 2,
+                crate::watch::ChangeKind::Unknown => 3,
+            };
+            // A change that cannot be described precisely means the subtree
+            // has to be rescanned, which is signalled by the `3` kind.
+            let kind = if change.needs_rescan { 3 } else { kind };
+
+            // Whether the path is a directory is looked up on the
+            // filesystem, because the watcher does not report it.
+            let is_dir = std::fs::metadata(&change.path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+
+            records.push(format!(
+                "{kind}\t{}\t{}",
+                if is_dir { 1 } else { 0 },
+                change.path.to_string_lossy()
+            ));
+        }
+    }
+
+    let mut written = 0usize;
+    let mut offset = 0usize;
+    let limit = capacity as usize;
+
+    for record in records {
+        let bytes = record.as_bytes();
+        if offset + bytes.len() + 1 > limit {
+            break;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                out.add(offset) as *mut u8,
+                bytes.len(),
+            );
+            *out.add(offset + bytes.len()) = 0;
+        }
+        offset += bytes.len() + 1;
+        written += 1;
+    }
+
+    written as c_int
 }
