@@ -1,0 +1,5 @@
+module FuzzyliteCore {
+    header "FuzzyliteCore.h"
+    link "fuzzylite_core"
+    export *
+}

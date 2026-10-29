@@ -1,0 +1,5 @@
+module FuzzyliteCore {
+    umbrella header "FuzzyliteCore.h"
+    link "fuzzylite_core"
+    export *
+}

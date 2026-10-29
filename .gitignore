@@ -1,0 +1,12 @@
+# Rust
+/core/target/
+
+# Swift
+/app/.build/
+/app/.swiftpm/
+
+# The packaged app
+/build/
+
+# macOS
+.DS_Store

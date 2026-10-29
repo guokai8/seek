@@ -1,0 +1,6 @@
+# The deployment target is pinned so that the C libraries the core links
+# against (notably zstd) are built for the same macOS version the app
+# targets. Without this, the linker warns that the object files are newer
+# than the deployment target.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"
