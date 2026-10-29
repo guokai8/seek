@@ -9,8 +9,6 @@ A floating Spotlight-style panel opens with `Cmd+Space`. Every keystroke is
 answered from an in-memory index, so results appear in well under a
 millisecond.
 
-![fuzzylite](docs/screenshot.png)
-
 ## Why
 
 Spotlight indexes the whole disk, which means it is slow to configure, slow to
@@ -77,6 +75,14 @@ format version and a checksum, so a snapshot from an incompatible build is
 rejected instead of misread. A snapshot built from different roots is
 rejected too, because its entry ids refer to a different tree.
 
+### Staying current
+
+An FSEvents watcher runs over the indexed roots. The changes it reports are
+applied to the index as they arrive, so a file created after the launch
+shows up without a restart. The watcher signals that it is running before
+the app continues, so that a change made right after startup is not
+missed.
+
 ## Building
 
 The Rust core needs a stable toolchain; the app needs Xcode.
@@ -124,6 +130,10 @@ cargo test --test fzf_parity -- --ignored         # parity with the real fzf
 cargo run --release --example bench -- ~/         # search latency
 ```
 
+The tests cover the parts that are easy to get subtly wrong: the matching
+against the real `fzf`, the concurrency between the searches and the index
+updates, and the watcher picking up a file that is created after the scan.
+
 The app has an end-to-end check that scans a directory, searches it, writes a
 snapshot, restores it and verifies that the ranking is unchanged:
 
@@ -145,7 +155,6 @@ core/src/
   persist.rs  the snapshot format
   watch.rs    the FSEvents watcher
   ffi.rs      the C ABI
-
 app/Sources/Fuzzylite/
   FuzzyliteApp.swift    the app, the hotkey and the floating panel
   ContentView.swift     the panel's layout
