@@ -210,7 +210,12 @@ struct ContentView: View {
                             // new query's field, footer and preview. The
                             // scroll target is the file id instead; see
                             // `onChange` below.
-                            ResultRow(hit: hit, isSelected: index == model.selection)
+                            ResultRow(
+                                hit: hit,
+                                isSelected: index == model.selection,
+                                showsModified: model.showsModified,
+                                showsSize: model.showsSize
+                            )
                                 .padding(.horizontal, 8)
                                 .background(
                                     RowShape()

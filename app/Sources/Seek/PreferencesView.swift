@@ -65,6 +65,16 @@ final class Preferences: ObservableObject {
     /// Zero means the panel stays open until it is closed by hand.
     @AppStorage("autoHideSeconds") var autoHideSeconds: Double = 30
 
+    /// Whether a result row says when the entry last changed.
+    ///
+    /// On by default. Two files of the same name in different folders are
+    /// told apart by the path, but two drafts of one are told apart by
+    /// the date, and the row has the room.
+    @AppStorage("showModified") var showModified: Bool = true
+
+    /// Whether a result row says how big the entry is.
+    @AppStorage("showSize") var showSize: Bool = true
+
     /// The global shortcut that summons the panel.
     var hotKey: HotKeyBinding {
         get {
@@ -320,6 +330,14 @@ struct PreferencesView: View {
                 .font(.system(size: 12))
 
             hint("A QuickLook preview of the selected file, beside the results. Press \u{21e5} to show or hide it without coming here.")
+
+            Toggle("Show when a file last changed", isOn: $preferences.showModified)
+                .font(.system(size: 12))
+
+            Toggle("Show the file size", isOn: $preferences.showSize)
+                .font(.system(size: 12))
+
+            hint("Shown at the right-hand end of each row. Neither affects the ranking \u{2014} a result's place in the list is what it matched, never when it was written.")
         }
     }
 

@@ -41,13 +41,7 @@ fn the_ffi_scan_completes() {
 
     // The search must find one of the files.
     let query = CString::new("f1.txt").unwrap();
-    let mut results: [SearchResultEntry; 16] = std::array::from_fn(|_| SearchResultEntry {
-        id: 0,
-        score: 0,
-        start: 0,
-        end: 0,
-        is_dir: 0,
-    });
+    let mut results: [SearchResultEntry; 16] = std::array::from_fn(|_| SearchResultEntry::default());
 
     let found = unsafe {
         sk_engine_search(

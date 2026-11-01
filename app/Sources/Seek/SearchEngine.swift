@@ -54,11 +54,55 @@ struct SearchHit: Identifiable, Equatable {
     /// Whether the entry is a directory.
     let isDirectory: Bool
 
+    /// The file size in bytes, as the last scan saw it.
+    ///
+    /// This and `modified` come from the index rather than from a `stat`
+    /// per row. The index has them because the scan had to stat every
+    /// entry anyway, and the row must not go back to the filesystem: the
+    /// only other copy lives behind the maintenance lock, which a rebuild
+    /// holds for the whole of a scan.
+    let byteSize: UInt64
+
+    /// When the entry last changed, or nil when the scan could not tell.
+    let modified: Date?
+
     /// The byte offsets of the matched characters within the relative path.
     ///
     /// The matcher scores the whole path, the way fzf does, so these
     /// offsets are relative to the path rather than to the file name.
     let positions: [Int]
+
+    /// The memberwise initialiser, with the display metadata optional.
+    ///
+    /// It is spelled out rather than synthesised so that `byteSize` and
+    /// `modified` can be left off. They are what the row displays, not
+    /// what it is, and the tests that build a hit to check a keystroke or
+    /// a preview have nothing to say about either. The one place that
+    /// builds a hit from a real search passes both, and
+    /// `ResultMetadataTests` fails if it stops.
+    init(
+        id: UInt32,
+        score: Int32,
+        path: String,
+        relativePath: String,
+        name: String,
+        directory: String,
+        isDirectory: Bool,
+        byteSize: UInt64 = 0,
+        modified: Date? = nil,
+        positions: [Int]
+    ) {
+        self.id = id
+        self.score = score
+        self.path = path
+        self.relativePath = relativePath
+        self.name = name
+        self.directory = directory
+        self.isDirectory = isDirectory
+        self.byteSize = byteSize
+        self.modified = modified
+        self.positions = positions
+    }
 
     /// The id, exposed for `Identifiable`.
     var identity: UInt32 { id }
@@ -663,6 +707,10 @@ final class SearchEngine: @unchecked Sendable {
                 name: name,
                 directory: directory,
                 isDirectory: raw[index].is_dir != 0,
+                byteSize: raw[index].size,
+                modified: raw[index].modified > 0
+                    ? Date(timeIntervalSince1970: TimeInterval(raw[index].modified))
+                    : nil,
                 positions: positions
             ))
         }

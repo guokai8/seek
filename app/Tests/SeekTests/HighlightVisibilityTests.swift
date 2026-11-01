@@ -59,7 +59,7 @@ final class HighlightVisibilityTests: XCTestCase {
         let row = ZStack {
             Color(white: 0.16)
 
-            ResultRow(hit: hit, isSelected: selected)
+            ResultRow(hit: hit, isSelected: selected, showsModified: false, showsSize: false)
                 .background(selected ? Theme.accent.opacity(0.22) : Color.clear)
         }
         .frame(width: Theme.panelWidth, height: 28)

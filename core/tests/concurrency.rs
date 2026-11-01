@@ -45,13 +45,7 @@ fn searching_while_the_index_is_rebuilt_does_not_crash() {
 
             while !stop.load(Ordering::Relaxed) {
                 let mut results: [SearchResultEntry; 32] = std::array::from_fn(|_| {
-                    SearchResultEntry {
-                        id: 0,
-                        score: 0,
-                        start: 0,
-                        end: 0,
-                        is_dir: 0,
-                    }
+                    SearchResultEntry::default()
                 });
 
                 let found = unsafe {

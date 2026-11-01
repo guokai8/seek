@@ -62,13 +62,7 @@ unsafe extern "C" fn record(
 /// An empty row buffer of `n` entries.
 fn buffer(n: usize) -> Vec<SearchResultEntry> {
     (0..n)
-        .map(|_| SearchResultEntry {
-            id: 0,
-            score: 0,
-            start: 0,
-            end: 0,
-            is_dir: 0,
-        })
+        .map(|_| SearchResultEntry::default())
         .collect()
 }
 

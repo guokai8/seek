@@ -42,6 +42,8 @@ fn assert_agrees(incremental: &Corpus, full: &Corpus, what: &str) {
     let paths = |c: &Corpus| c.paths().map(|p| p.to_string()).collect::<Vec<_>>();
     let dirs = |c: &Corpus| c.entries.iter().map(|e| e.is_dir).collect::<Vec<_>>();
     let roots = |c: &Corpus| c.entries.iter().map(|e| e.root).collect::<Vec<_>>();
+    let sizes = |c: &Corpus| c.entries.iter().map(|e| e.size).collect::<Vec<_>>();
+    let times = |c: &Corpus| c.entries.iter().map(|e| e.modified).collect::<Vec<_>>();
 
     assert_eq!(paths(incremental), paths(full), "paths disagree after {what}");
     assert_eq!(ids(incremental), ids(full), "ids disagree after {what}");
@@ -52,6 +54,14 @@ fn assert_agrees(incremental: &Corpus, full: &Corpus, what: &str) {
         "trim lengths disagree after {what}"
     );
     assert_eq!(incremental.roots, full.roots, "roots disagree after {what}");
+
+    // The row shows both of these, and a watcher batch is the one thing
+    // that changes them: a file saved is a new size and a new mtime at an
+    // id that already existed. Carrying the old entry over instead of
+    // rebuilding it would leave the row showing yesterday's size for as
+    // long as the app ran.
+    assert_eq!(sizes(incremental), sizes(full), "sizes disagree after {what}");
+    assert_eq!(times(incremental), times(full), "mtimes disagree after {what}");
 }
 
 #[test]
@@ -79,6 +89,16 @@ fn a_modified_file_keeps_its_place() {
     let dirty = index.take_dirty();
     let incremental = before.updated(&index, &dirty);
     assert_agrees(&incremental, &Corpus::build(&index), "a file was modified");
+
+    // Said outright as well as by agreement: the snapshot the panel draws
+    // from carries the size the file has now, not the one it had.
+    let position = incremental
+        .paths()
+        .position(|path| path == "docs/b.md")
+        .expect("the file left the snapshot");
+    let entry = incremental.entries[position];
+    assert_eq!(entry.size, 99, "the snapshot kept the old size");
+    assert_eq!(entry.modified, 42, "the snapshot kept the old mtime");
 }
 
 #[test]

@@ -34,6 +34,8 @@ typedef struct {
     int32_t start;   /* byte offset of the first matched character           */
     int32_t end;     /* byte offset just past the last matched character      */
     uint8_t is_dir;  /* 1 when the entry is a directory, 0 otherwise          */
+    uint64_t size;   /* the file size in bytes, as the last scan saw it        */
+    int64_t modified;/* the mtime, as a Unix timestamp in seconds             */
 } FlSearchResult;
 
 /* Creates a new engine. Returns NULL on failure. */
