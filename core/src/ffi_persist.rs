@@ -20,7 +20,7 @@ use crate::persist;
 ///
 /// `engine` must be a valid engine and `path` a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn fl_engine_load_snapshot(
+pub unsafe extern "C" fn sk_engine_load_snapshot(
     engine: *mut crate::ffi::Engine,
     path: *const c_char,
 ) -> c_int {
@@ -43,8 +43,8 @@ pub unsafe extern "C" fn fl_engine_load_snapshot(
     let count = snapshot.index.len() as c_int;
 
     let mut inner = eng.write();
-    inner.corpus = crate::corpus::Corpus::build(&snapshot.index);
     inner.index = snapshot.index;
+    eng.publish(&mut inner.index);
 
     count
 }
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn fl_engine_load_snapshot(
 ///
 /// `engine` must be a valid engine and `path` a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn fl_engine_save_snapshot(
+pub unsafe extern "C" fn sk_engine_save_snapshot(
     engine: *mut crate::ffi::Engine,
     path: *const c_char,
 ) -> c_int {
@@ -79,13 +79,13 @@ pub unsafe extern "C" fn fl_engine_save_snapshot(
 
 /// The default path of the snapshot file, as a newly allocated C string.
 ///
-/// The caller owns the string and must free it with [`crate::ffi::fl_string_free`].
+/// The caller owns the string and must free it with [`crate::ffi::sk_string_free`].
 ///
 /// # Safety
 ///
 /// The returned pointer must be freed by the caller.
 #[no_mangle]
-pub unsafe extern "C" fn fl_engine_default_snapshot_path() -> *mut c_char {
+pub unsafe extern "C" fn sk_engine_default_snapshot_path() -> *mut c_char {
     match CString::new(persist::default_snapshot_path().to_string_lossy().as_bytes()) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn fl_engine_default_snapshot_path() -> *mut c_char {
 ///
 /// `path` must be a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn fl_snapshot_exists(path: *const c_char) -> c_int {
+pub unsafe extern "C" fn sk_snapshot_exists(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }

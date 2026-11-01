@@ -33,7 +33,7 @@
 use super::normalize::normalize_char;
 use super::scratch::Scratch;
 use super::score::{
-    CharClasses, MatchResult, Position, Scheme, BONUS_BOUNDARY, BONUS_CONSECUTIVE,
+    CharClass, CharClasses, MatchResult, Position, Scheme, BONUS_BOUNDARY, BONUS_CONSECUTIVE,
     BONUS_FIRST_CHAR_MULTIPLIER, SCORE_GAP_EXTENSION, SCORE_GAP_START, SCORE_MATCH,
 };
 
@@ -50,6 +50,16 @@ pub trait CharSource {
 
     /// The byte offset of the character at an index.
     fn byte_offset(&self, index: usize) -> usize;
+
+    /// The underlying bytes, when every character is a single ASCII byte.
+    ///
+    /// The prefilter uses this to search with `memchr` rather than walking
+    /// the characters one at a time, which is where it spends most of its
+    /// time. A source that is not plain ASCII answers `None` and gets the
+    /// character-by-character scan.
+    fn ascii_bytes(&self) -> Option<&[u8]> {
+        None
+    }
 
     /// The byte offset just past the last character.
     fn byte_len(&self) -> usize;
@@ -85,6 +95,11 @@ impl CharSource for AsciiBytes<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.bytes.len()
+    }
+
+    #[inline]
+    fn ascii_bytes(&self) -> Option<&[u8]> {
+        Some(self.bytes)
     }
 
     #[inline]
@@ -150,6 +165,27 @@ impl CharSource for DecodedChars {
     }
 }
 
+/// Which of several equally scoring occurrences is reported as the match.
+///
+/// When a pattern character occurs more than once with the same score, the
+/// matcher has to pick one, and the choice is visible in the ranking: the
+/// reported span is what the `Begin`, `End`, `Chunk` and `Pathname`
+/// tiebreaks are measured from.
+///
+/// fzf decides the direction from the tiebreak chain rather than fixing it,
+/// because the criteria disagree about which occurrence is the interesting
+/// one. `Pathname` wants the match as late as possible, so that a pattern
+/// that could match a directory is still credited to the file name. See
+/// [`scan_direction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    /// Scan forward and keep the first best occurrence.
+    #[default]
+    Forward,
+    /// Scan backward and keep the last best occurrence.
+    Backward,
+}
+
 /// A compiled query, ready to be matched against many haystacks.
 pub struct FuzzyMatcher {
     /// Pattern characters, lowercased when case-insensitive.
@@ -163,6 +199,8 @@ pub struct FuzzyMatcher {
     normalize: bool,
     /// Character classification tables.
     classes: CharClasses,
+    /// Which equally scoring occurrence is reported as the match.
+    direction: Direction,
 }
 
 impl FuzzyMatcher {
@@ -204,6 +242,28 @@ impl FuzzyMatcher {
             case_sensitive,
             normalize,
             classes: CharClasses::new(scheme),
+            direction: Direction::Forward,
+        }
+    }
+
+    /// Sets which equally scoring occurrence is reported as the match.
+    ///
+    /// The direction belongs to the tiebreak chain, not to the pattern, so
+    /// it is derived with [`scan_direction`] rather than chosen by hand.
+    pub fn scanning(mut self, direction: Direction) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    /// Whether a score at this occurrence displaces the best seen so far.
+    ///
+    /// Scanning forward keeps the first of several equal scores and
+    /// scanning backward keeps the last, which is the whole of the
+    /// difference between the two directions.
+    fn improves(&self, score: i16, best: i16) -> bool {
+        match self.direction {
+            Direction::Forward => score > best,
+            Direction::Backward => score >= best,
         }
     }
 
@@ -275,6 +335,157 @@ impl FuzzyMatcher {
         }
     }
 
+    /// The highest score this pattern can reach against any haystack.
+    ///
+    /// Every matched character is worth [`SCORE_MATCH`] plus a bonus, the
+    /// first character's bonus counts twice, and a gap only ever
+    /// subtracts. So the best conceivable match is every character landing
+    /// on the best boundary this scheme offers, with no gaps at all.
+    ///
+    /// This is what makes it possible to leave a candidate unscored: a
+    /// candidate whose ceiling is below a score already achieved by enough
+    /// others cannot reach the rows that will be shown.
+    pub fn score_ceiling(&self) -> i32 {
+        let m = self.pattern.len() as i32;
+        if m == 0 {
+            return 0;
+        }
+        let bonus = self.classes.max_bonus() as i32;
+
+        m * SCORE_MATCH as i32
+            + bonus * BONUS_FIRST_CHAR_MULTIPLIER as i32
+            + (m - 1) * bonus
+    }
+
+    /// The characters a consecutive run of this pattern has to follow for
+    /// the match to reach [`FuzzyMatcher::score_ceiling`] — or `None` when
+    /// the ceiling does not require that.
+    ///
+    /// This sharpens the bound the search prunes with. A path that does
+    /// not hold the pattern as a consecutive run pays a gap and so scores
+    /// at least three below the ceiling; but *holding* the run is not
+    /// enough to reach the ceiling either. The ceiling pays the scheme's
+    /// best bonus for every character, and the best bonus is only ever
+    /// earned by following one particular class of character — a path
+    /// separator under [`Scheme::Path`], whitespace under
+    /// [`Scheme::Default`]. A run anywhere else starts one bonus lower,
+    /// and because a run's later characters inherit the run's first bonus,
+    /// every character of it is one lower too: at least `m + 1` below the
+    /// ceiling, so at least three for a pattern of two characters or more.
+    ///
+    /// So for the great majority of a broad query's matches — the ones
+    /// that hold the query in the middle of a word — this says "cannot be
+    /// shown" where the consecutive-run bound has to say "score it and
+    /// see".
+    ///
+    /// `None` is returned when that argument does not hold:
+    ///
+    /// * a pattern of one character, where the run is the whole match and
+    ///   there are no inherited bonuses to be one lower;
+    /// * a pattern that is not plain ASCII, because the test this feeds is
+    ///   byte-wise while the matcher folds accents; and
+    /// * a pattern that **carries its own boundary** — one where some
+    ///   character pays the best bonus to the character after it, as the
+    ///   `/` of `/b` does. Such a run earns the best bonus from inside
+    ///   itself no matter where it sits, which lifts it to two below the
+    ///   ceiling: exactly the threshold the prune arms at, and so exactly
+    ///   a row that could tie for the last place shown.
+    pub fn ceiling_boundary(&self) -> Option<CeilingBoundary> {
+        // The raw pattern, not the folded one: this feeds a byte-wise
+        // test, and `tést` folds to the ASCII `test` while the bytes the
+        // caller searches for are still the accented ones.
+        if self.pattern.len() < 2 || !self.pattern_raw.is_ascii() {
+            return None;
+        }
+
+        let max = self.classes.max_bonus();
+        // A run's later characters inherit the greater of the run's first
+        // bonus and `BONUS_CONSECUTIVE`, so the argument needs the best
+        // bonus to be the larger of the two. It is, by a wide margin, in
+        // both schemes — but it is a dependency between constants, and
+        // the alternative to checking it is a bound that quietly stops
+        // holding if one of them is ever changed.
+        if max <= BONUS_CONSECUTIVE {
+            return None;
+        }
+
+        // A character of the pattern may be matched in either case, which
+        // can put it in a different class, so both are considered. Taking
+        // the union rather than the exact case is the conservative
+        // direction: it can only refuse more patterns.
+        let classes_of = |c: char| {
+            [
+                self.classes.class_of_char(c.to_ascii_lowercase()),
+                self.classes.class_of_char(c.to_ascii_uppercase()),
+            ]
+        };
+
+        // Does the pattern carry its own boundary? If any character of it
+        // can pay the best bonus to the character after it, a run earns
+        // that bonus wherever it sits, and the bound does not hold. `/b`
+        // is the case that matters: `score_bound.rs` has it scoring two
+        // below the ceiling in the middle of a name, which is exactly
+        // where the prune arms.
+        for pair in self.pattern.windows(2) {
+            for before in classes_of(pair[0]) {
+                for after in classes_of(pair[1]) {
+                    if self.classes.bonus_for(before, after) >= max {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // What is left is the set of predecessors that *do* pay the best
+        // bonus to the pattern's first character. Derived from the bonus
+        // matrix rather than written down, so that a change to the
+        // scheme's constants moves the set with it.
+        let first = classes_of(self.pattern[0]);
+        let pays = |before: CharClass| {
+            first
+                .iter()
+                .any(|&after| self.classes.bonus_for(before, after) >= max)
+        };
+
+        let mut bytes = 0u128;
+        for b in 0u8..128 {
+            if pays(self.classes.class_of_byte(b)) {
+                bytes |= 1u128 << b;
+            }
+        }
+
+        Some(CeilingBoundary {
+            bytes,
+            at_start: pays(self.classes.initial_char_class()),
+        })
+    }
+
+    /// Whether the pattern occurs in `haystack` as a subsequence at all.
+    ///
+    /// This is the matcher's first phase on its own — it answers whether
+    /// the candidate matches, without scoring it. A match that is going to
+    /// be left out of the ranking still has to be counted, and counting is
+    /// all this does.
+    pub fn occurs_in(&self, haystack: &str) -> bool {
+        if self.pattern.is_empty() {
+            return true;
+        }
+
+        let bytes = haystack.as_bytes();
+        if bytes.is_ascii() {
+            if self.pattern.len() > bytes.len() {
+                return false;
+            }
+            self.fuzzy_index(&AsciiBytes::new(bytes)).is_some()
+        } else {
+            let decoded = DecodedChars::new(haystack);
+            if self.pattern.len() > decoded.len() {
+                return false;
+            }
+            self.fuzzy_index(&decoded).is_some()
+        }
+    }
+
     /// Matches `haystack` without collecting the matched positions.
     ///
     /// This is the fast path used when ranking: the positions are only
@@ -323,6 +534,32 @@ impl FuzzyMatcher {
             return self.match_single(source, min_idx, max_idx);
         }
 
+        // Phases 2 to 4 live in a function of their own, which is
+        // deliberately not inlined. They are the bulk of the matcher's
+        // code, and a single-character pattern never reaches them: with
+        // them inline here, `run_inner` grew large enough that the
+        // one-character path measured 15% slower purely from the code it
+        // shared a function body with.
+        self.score_matrix(source, min_idx, max_idx, want_positions, scratch)
+    }
+
+    /// Phases 2 to 4: the bonus row, the score matrix and the backtrace.
+    ///
+    /// Split out of [`FuzzyMatcher::run_inner`] so that the short paths — an
+    /// empty pattern, a pattern longer than the haystack, and above all a
+    /// single-character pattern, which is every query's first keystroke —
+    /// do not pay for the size of this one.
+    #[inline(never)]
+    fn score_matrix<S: CharSource>(
+        &self,
+        source: &S,
+        min_idx: usize,
+        max_idx: usize,
+        want_positions: bool,
+        scratch: &mut Scratch,
+    ) -> (MatchResult, Vec<Position>) {
+        let m = self.pattern.len();
+
         // The candidate window, folded for comparison.
         //
         // The scratch buffers are borrowed all at once so that the compiler
@@ -335,7 +572,7 @@ impl FuzzyMatcher {
             f,
             h,
             c,
-            positions: _,
+            positions: trail,
         } = scratch;
 
         window.clear();
@@ -406,11 +643,15 @@ impl FuzzyMatcher {
         let f0 = f[0] as usize;
         let width = last_idx - f0 + 1;
 
-        h.clear();
+        // The matrix is not cleared, only grown. Every one of its cells is
+        // either written by the loop below or zeroed by hand just before
+        // the row that holds it, so none of the previous candidate's values
+        // survives. Clearing it first would write `width * m` zeros per
+        // candidate — a couple of kilobytes for a long path — and the loop
+        // is about to overwrite most of them.
         h.resize(width * m, 0);
         h[..width].copy_from_slice(&h0[f0..=last_idx]);
 
-        c.clear();
         c.resize(width * m, 0);
         c[..width].copy_from_slice(&c0[f0..=last_idx]);
 
@@ -420,14 +661,48 @@ impl FuzzyMatcher {
         for row_idx in 1..m {
             let f_off = f[row_idx] as usize;
             let pchar = self.pattern[row_idx];
-            let row = row_idx * width;
+            let base = row_idx * width;
+
+            // The two rows this iteration touches: the one filled last
+            // time, which it reads diagonally, and the one it fills. They
+            // are split out so that the inner loop indexes a slice of
+            // known length instead of computing an offset into the whole
+            // matrix on each of six reads.
+            let (h_prev, h_cur) = h[base - width..base + width].split_at_mut(width);
+            let (c_prev, c_cur) = c[base - width..base + width].split_at_mut(width);
+
+            // The first column this row fills. The greedy first
+            // occurrences are strictly increasing, so a row below the
+            // first always starts at least one column in, which is what
+            // makes the diagonal `lo - 1` a cell that exists.
+            let lo = f_off - f0;
+            let cols = last_idx + 1 - f_off;
+
+            // The columns before the first one this row fills are never
+            // written by the loop, and the backtrace reads them, so they
+            // are zeroed here rather than by clearing the whole matrix.
+            h_cur[..lo].fill(0);
+            c_cur[..lo].fill(0);
+
+            // Every one of these is exactly `cols` long and indexed by the
+            // same `k`, which is what lets the bounds checks fall away.
+            let t_row = &t[f_off..f_off + cols];
+            let bonus_row = &bonus[f_off..f_off + cols];
+            let h_diag = &h_prev[lo - 1..lo - 1 + cols];
+            let c_diag = &c_prev[lo - 1..lo - 1 + cols];
+            let h_row = &mut h_cur[lo..lo + cols];
+            let c_row = &mut c_cur[lo..lo + cols];
+
             let mut in_gap = false;
 
-            for col in f_off..=last_idx {
-                let local = col - f0;
+            // The score of the cell to the left is the one the previous
+            // iteration just computed, so it is carried in a register
+            // rather than read back out of the row. The first column has
+            // no left neighbour and fzf scores it as if it were zero.
+            let mut hleft: i16 = 0;
 
+            for k in 0..cols {
                 // s2: skip this haystack character.
-                let hleft = if col == f_off { 0 } else { h[row + local - 1] };
                 let s2 = if in_gap {
                     hleft + SCORE_GAP_EXTENSION
                 } else {
@@ -438,13 +713,12 @@ impl FuzzyMatcher {
                 let mut s1 = 0i16;
                 let mut consecutive = 0i16;
 
-                if pchar == t[col] {
-                    let hdiag = h[row + local - 1 - width];
-                    let cdiag = c[row + local - 1 - width];
-                    s1 = hdiag + SCORE_MATCH;
-                    let mut b = bonus[col];
-                    consecutive = cdiag + 1;
+                if pchar == t_row[k] {
+                    s1 = h_diag[k] + SCORE_MATCH;
+                    let mut b = bonus_row[k];
+                    consecutive = c_diag[k] + 1;
                     if consecutive > 1 {
+                        let col = f_off + k;
                         let fb = bonus[col.saturating_sub(consecutive as usize - 1)];
                         // Break the consecutive chunk when a better boundary
                         // appears, otherwise keep the highest bonus.
@@ -455,36 +729,54 @@ impl FuzzyMatcher {
                         }
                     }
                     if s1 + b < s2 {
-                        s1 += bonus[col];
+                        s1 += bonus_row[k];
                         consecutive = 0;
                     } else {
                         s1 += b;
                     }
                 }
 
-                c[row + local] = consecutive;
+                c_row[k] = consecutive;
                 in_gap = s1 < s2;
                 let score = s1.max(s2).max(0);
-                if row_idx == m - 1 && score > max_score {
+                if row_idx == m - 1 && self.improves(score, max_score) {
                     max_score = score;
-                    max_score_pos = col;
+                    max_score_pos = f_off + k;
                 }
-                h[row + local] = score;
+                h_row[k] = score;
+                hleft = score;
             }
         }
 
-        // Phase 4: backtrace to recover the matched positions. This is only
-        // done when the caller actually needs them.
+        // Phase 4: backtrace to recover the matched positions.
+        //
+        // The backtrace runs for every candidate, not only the ones whose
+        // positions are wanted, because it is what tells us where the match
+        // actually begins. `f0` is only the first place the pattern's first
+        // character *could* land, which is a different thing: in
+        // `libparse/src` the pattern `src` can begin at the `s` of
+        // `libparse`, while the match fzf settles on begins at the `s` after
+        // the separator. The tiebreaks are measured from the start, so
+        // reporting `f0` ranks such an entry as a match on a directory.
+        //
+        // fzf makes the same distinction the other way around: it skips the
+        // backtrace when no positions are wanted, and therefore sets
+        // `withPos` whenever the tiebreak chain needs a true start. The
+        // backtrace walks one row where the matrix filled `m` of them, so
+        // running it always costs a fraction of the work already done and
+        // leaves no way for the two to disagree.
+        self.backtrace(h, c, f, m, width, f0, last_idx, max_score_pos, trail);
+
         let positions = if want_positions {
-            let raw = self.backtrace(h, c, f, m, width, f0, last_idx, max_score_pos);
-            raw.into_iter()
-                .map(|p| source.byte_offset(min_idx + p) as Position)
+            trail
+                .iter()
+                .map(|&p| source.byte_offset(min_idx + p as usize) as Position)
                 .collect()
         } else {
             Vec::new()
         };
 
-        let start_char = min_idx + f0;
+        let start_char = min_idx + trail.first().map_or(f0, |&p| p as usize);
         let end_char = (min_idx + max_score_pos + 1).min(source.len());
         (
             MatchResult {
@@ -497,6 +789,10 @@ impl FuzzyMatcher {
     }
 
     /// Walks the score matrix backwards to recover matched char offsets.
+    ///
+    /// The offsets are written into `positions` in ascending order, which is
+    /// the caller's reusable buffer: the backtrace runs for every candidate,
+    /// so it must not allocate.
     #[allow(clippy::too_many_arguments)]
     fn backtrace(
         &self,
@@ -508,8 +804,9 @@ impl FuzzyMatcher {
         f0: usize,
         last_idx: usize,
         max_score_pos: usize,
-    ) -> Vec<usize> {
-        let mut positions = Vec::with_capacity(m);
+        positions: &mut Vec<i32>,
+    ) {
+        positions.clear();
         let mut i = m as i32 - 1;
         let mut j = max_score_pos;
         let mut prefer_match = true;
@@ -532,7 +829,7 @@ impl FuzzyMatcher {
             }
 
             if s > s1 && (s > s2 || (s == s2 && prefer_match)) {
-                positions.push(j);
+                positions.push(j as i32);
                 if i == 0 {
                     break;
                 }
@@ -551,20 +848,26 @@ impl FuzzyMatcher {
         }
 
         positions.reverse();
-        positions
     }
 
     /// Matches a single-character pattern, mirroring fzf's
     /// `fuzzyMatchV2Single` fast path.
     ///
-    /// fzf scans forward and *stops* at the first occurrence whose bonus
-    /// reaches `BONUS_BOUNDARY`, rather than taking the highest-scoring
-    /// occurrence. This matters: a later occurrence may score higher, but
-    /// fzf never sees it. For example, in `regex-automata/dfa/accel.rs` the
-    /// first boundary-bonus `a` follows a `-` (score 32), while a later `a`
-    /// follows a `/` (score 34) — fzf reports 32.
+    /// When scanning forward, fzf *stops* at the first occurrence whose
+    /// bonus reaches `BONUS_BOUNDARY`, rather than taking the
+    /// highest-scoring occurrence. This matters: a later occurrence may
+    /// score higher, but fzf never sees it. For example, in
+    /// `regex-automata/dfa/accel.rs` the first boundary-bonus `a` follows a
+    /// `-` (score 32), while a later `a` follows a `/` (score 34) — fzf
+    /// reports 32.
     ///
-    /// The best-scoring occurrence wins; ties keep the leftmost one.
+    /// The stop only happens when the occurrence improved on the best score
+    /// so far. An occurrence at a boundary that is *worse* than one already
+    /// seen does not end the scan, so a still better one further on is
+    /// still found.
+    ///
+    /// The best-scoring occurrence wins; which of several equal scores is
+    /// kept is [`Direction`]'s to decide.
     fn match_single<S: CharSource>(
         &self,
         source: &S,
@@ -590,14 +893,16 @@ impl FuzzyMatcher {
             let bonus = self.classes.bonus_for(prev_class, class);
             let score = SCORE_MATCH + bonus * BONUS_FIRST_CHAR_MULTIPLIER;
 
-            if score > max_score {
+            if self.improves(score, max_score) {
                 max_score = score;
                 max_score_pos = Some(idx);
-            }
 
-            // fzf stops as soon as a boundary bonus is reached.
-            if bonus >= BONUS_BOUNDARY {
-                break;
+                // Scanning forward, fzf stops as soon as a boundary bonus
+                // is reached. Scanning backward it cannot stop, because the
+                // occurrence it wants is the last one.
+                if self.direction == Direction::Forward && bonus >= BONUS_BOUNDARY {
+                    break;
+                }
             }
         }
 
@@ -648,13 +953,45 @@ impl FuzzyMatcher {
         Some((first_idx, last_idx + 1))
     }
 
+    /// The byte, or pair of bytes, that fold to an ASCII needle.
+    ///
+    /// The pattern was folded when the matcher was compiled, so a
+    /// case-insensitive needle is already lowercase and the only other
+    /// byte that can fold onto it is its uppercase form. A needle that is
+    /// not ASCII has no byte form and answers `None`.
+    #[inline]
+    fn ascii_needle(&self, needle: char) -> Option<(u8, u8)> {
+        if !needle.is_ascii() {
+            return None;
+        }
+        let lower = needle as u8;
+        let upper = if self.case_sensitive {
+            lower
+        } else {
+            lower.to_ascii_uppercase()
+        };
+        Some((lower, upper))
+    }
+
     /// Finds the next occurrence of `needle` at or after `from`.
     fn find_char<S: CharSource>(&self, source: &S, from: usize, needle: char) -> Option<usize> {
+        if let (Some(bytes), Some((lower, upper))) =
+            (source.ascii_bytes(), self.ascii_needle(needle))
+        {
+            let hay = bytes.get(from..)?;
+            return memchr::memchr2(lower, upper, hay).map(|i| i + from);
+        }
         (from..source.len()).find(|&i| self.fold(source.get(i)) == needle)
     }
 
     /// Finds the last occurrence of `needle` at or after `from`.
     fn rfind_char<S: CharSource>(&self, source: &S, from: usize, needle: char) -> Option<usize> {
+        if let (Some(bytes), Some((lower, upper))) =
+            (source.ascii_bytes(), self.ascii_needle(needle))
+        {
+            let hay = bytes.get(from..)?;
+            return memchr::memrchr2(lower, upper, hay).map(|i| i + from);
+        }
         (from..source.len()).rev().find(|&i| self.fold(source.get(i)) == needle)
     }
 
@@ -662,10 +999,25 @@ impl FuzzyMatcher {
     /// case-insensitive, then applies accent normalization when enabled.
     #[inline]
     fn fold(&self, c: char) -> char {
+        // Almost every character of almost every path is ASCII, and this
+        // runs several times per character per candidate — once in the
+        // prefilter's forward scan, once in its backward scan, and once
+        // more when the window is built. The ASCII case is therefore split
+        // out and kept to a comparison and a conditional subtraction.
+        //
+        // Nothing is skipped by doing so: `normalize_char` folds accented
+        // Latin letters, and it already answers `None` for every code point
+        // below U+00C0, so it has nothing to say about an ASCII character.
+        if c.is_ascii() {
+            return if !self.case_sensitive && c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            };
+        }
+
         let c = if self.case_sensitive {
             c
-        } else if c.is_ascii_uppercase() {
-            c.to_ascii_lowercase()
         } else {
             c.to_lowercase().next().unwrap_or(c)
         };
@@ -681,4 +1033,34 @@ impl FuzzyMatcher {
 /// compiled matcher around. Useful for tests and one-off scoring.
 pub fn score_text(pattern: &str, haystack: &str, case_sensitive: bool, scheme: Scheme) -> i32 {
     FuzzyMatcher::new(pattern, case_sensitive, scheme).match_text(haystack).score
+}
+
+/// The characters a consecutive run must follow to reach the ceiling.
+///
+/// Built by [`FuzzyMatcher::ceiling_boundary`], which is where the
+/// argument for it is written down. It is a set of ASCII bytes plus
+/// whether the start of the haystack counts as one, kept as a bitmask
+/// because it is asked about once per candidate on every keystroke.
+#[derive(Debug, Clone, Copy)]
+pub struct CeilingBoundary {
+    /// The ASCII bytes a run may follow, one bit each.
+    bytes: u128,
+    /// Whether a run at offset 0 can reach the ceiling.
+    at_start: bool,
+}
+
+impl CeilingBoundary {
+    /// Whether a run beginning after `prev` can reach the ceiling.
+    ///
+    /// `None` is the start of the haystack. A non-ASCII predecessor
+    /// answers `true`: the only use of this is to dismiss a candidate, so
+    /// a wrong `false` drops a row while a wrong `true` only costs the
+    /// work of scoring one.
+    pub fn follows(&self, prev: Option<u8>) -> bool {
+        match prev {
+            None => self.at_start,
+            Some(b) if b.is_ascii() => self.bytes & (1u128 << b) != 0,
+            Some(_) => true,
+        }
+    }
 }

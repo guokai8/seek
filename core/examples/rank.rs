@@ -3,7 +3,7 @@
 //!
 //! Usage: `cargo run --example rank -- <pattern> <file-with-candidates> [ignore_case]`
 
-use fuzzylite_core::fuzzy::{rank_candidates, FuzzyMatcher, Scheme, DEFAULT_CRITERIA};
+use seek_core::fuzzy::{rank_candidates, FuzzyMatcher, Scheme};
 use std::env;
 use std::fs;
 
@@ -20,8 +20,12 @@ fn main() {
     let content = fs::read_to_string(&file).unwrap_or_default();
     let candidates: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
 
+    // The chain has to come from the scheme. Passing `DEFAULT_CRITERIA`
+    // here regardless of it drops `Pathname` from the path scheme, and the
+    // ordering that comes out is neither of fzf's — which made this
+    // example disagree with fzf while the library agreed with it.
     let m = FuzzyMatcher::new(&pattern, !ignore_case, scheme);
-    let ranked = rank_candidates(&m, &candidates, DEFAULT_CRITERIA);
+    let ranked = rank_candidates(m, &candidates, scheme.criteria());
 
     for r in ranked {
         println!("{}", candidates[r.index]);

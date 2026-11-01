@@ -343,7 +343,7 @@ impl Watcher {
         let watch_path = path.to_path_buf();
 
         let handle = std::thread::Builder::new()
-            .name("fuzzylite-watch".into())
+            .name("seek-watch".into())
             .spawn(move || {
                 run_watch_loop(&watch_path, tx, stop_thread, Some(ready_tx));
             })

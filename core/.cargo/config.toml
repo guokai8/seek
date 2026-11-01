@@ -1,6 +1,11 @@
 # The deployment target is pinned so that the C libraries the core links
 # against (notably zstd) are built for the same macOS version the app
-# targets. Without this, the linker warns that the object files are newer
-# than the deployment target.
+# targets. Without this the object files are newer than the deployment
+# target, and the bundle will not launch on the macOS its Info.plist
+# promises.
+#
+# Cargo reads this file from the working directory, so it only applies to a
+# build started inside `core/`. `build.sh` and `bundle.sh` invoke cargo
+# from the repository root, and they export the same value themselves.
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"
