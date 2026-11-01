@@ -44,6 +44,12 @@ pub unsafe extern "C" fn sk_engine_load_snapshot(
 
     let mut inner = eng.write();
     inner.index = snapshot.index;
+
+    // A snapshot carries the standing of the scan that wrote it. Leaving
+    // this alone would restore a partial index on top of the optimistic
+    // default and report it as a finished one.
+    inner.scan_complete = snapshot.complete;
+
     eng.publish(&mut inner.index);
 
     count
@@ -71,7 +77,12 @@ pub unsafe extern "C" fn sk_engine_save_snapshot(
     let eng = &*engine;
     let inner = eng.read();
 
-    match persist::save(&inner.index, &inner.roots, &PathBuf::from(text)) {
+    match persist::save(
+        &inner.index,
+        &inner.roots,
+        inner.scan_complete,
+        &PathBuf::from(text),
+    ) {
         Ok(()) => 0,
         Err(_) => -1,
     }

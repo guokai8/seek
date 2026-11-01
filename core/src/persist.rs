@@ -26,10 +26,10 @@ use crate::index::Index;
 /// The current snapshot format version.
 ///
 /// Bumping this invalidates every snapshot written by an older build.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The magic bytes at the start of a snapshot file.
-const MAGIC: &[u8; 8] = b"SEEKIDX1";
+const MAGIC: &[u8; 8] = b"SEEKIDX2";
 
 /// The header of a snapshot container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,14 @@ pub struct Snapshot {
     pub roots: Vec<PathBuf>,
     /// When the snapshot was written, as a Unix timestamp in seconds.
     pub written_at: i64,
+    /// Whether the scan that produced this index walked everything.
+    ///
+    /// False when the scan ran out of its deadline, which leaves the index
+    /// partial. The engine knows this while it is running, but the
+    /// knowledge died with the process: a snapshot written from a
+    /// cut-short scan came back indistinguishable from a whole one, and
+    /// the next launch reported half a tree as a finished index.
+    pub complete: bool,
     /// The serialised index.
     pub index: Index,
 }
@@ -84,7 +92,12 @@ fn payload_hash(bytes: &[u8]) -> u64 {
 /// The write is atomic: the data goes to a temporary file next to the target
 /// and is renamed into place, so a crash never leaves a half-written
 /// snapshot behind.
-pub fn save(index: &Index, roots: &[PathBuf], path: &Path) -> Result<(), LoadError> {
+pub fn save(
+    index: &Index,
+    roots: &[PathBuf],
+    complete: bool,
+    path: &Path,
+) -> Result<(), LoadError> {
     let snapshot = Snapshot {
         version: FORMAT_VERSION,
         roots: roots.to_vec(),
@@ -92,6 +105,7 @@ pub fn save(index: &Index, roots: &[PathBuf], path: &Path) -> Result<(), LoadErr
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
+        complete,
         index: index.clone(),
     };
 
@@ -230,7 +244,7 @@ mod tests {
 
         let index = sample_index();
         let roots = vec![PathBuf::from("/home")];
-        save(&index, &roots, &path).unwrap();
+        save(&index, &roots, true, &path).unwrap();
 
         let loaded = load(&path, &roots).unwrap();
         assert_eq!(loaded.index.len(), index.len());
@@ -244,12 +258,37 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_remembers_that_its_scan_was_cut_short() {
+        // Without this the only record of a partial index is in memory, and
+        // it dies with the process: the next launch reads the snapshot back
+        // and has nothing to tell it that half the tree is missing.
+        let dir = std::env::temp_dir().join(format!("seek-test-partial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.skidx");
+        let roots = vec![PathBuf::from("/home")];
+
+        save(&sample_index(), &roots, false, &path).unwrap();
+        assert!(
+            !load(&path, &roots).unwrap().complete,
+            "a snapshot of a scan that was cut short came back claiming to be complete"
+        );
+
+        save(&sample_index(), &roots, true, &path).unwrap();
+        assert!(
+            load(&path, &roots).unwrap().complete,
+            "a snapshot of a finished scan came back claiming to be partial"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn rejects_a_snapshot_for_other_roots() {
         let dir = std::env::temp_dir().join(format!("seek-test-roots-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("index.skidx");
 
-        save(&sample_index(), &[PathBuf::from("/home")], &path).unwrap();
+        save(&sample_index(), &[PathBuf::from("/home")], true, &path).unwrap();
 
         let result = load(&path, &[PathBuf::from("/other")]);
         assert!(matches!(result, Err(LoadError::RootsMismatch)));
@@ -263,7 +302,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("index.skidx");
 
-        save(&sample_index(), &[], &path).unwrap();
+        save(&sample_index(), &[], true, &path).unwrap();
 
         let mut bytes = std::fs::read(&path).unwrap();
         let len = bytes.len();

@@ -271,6 +271,15 @@ final class AppModel: ObservableObject {
 
         if engine.loadSnapshot(at: path) {
             indexedCount = engine.count
+
+            // The snapshot records whether the scan behind it finished, and
+            // the default for this is the optimistic one. Without reading it
+            // back, an index restored from a scan that ran out of its
+            // deadline would lose its "scan cut short" the moment it came
+            // off disk, and the footer would report half a tree as a whole
+            // one until the next scan happened to get all the way through.
+            scanComplete = engine.scanComplete
+
             status = "Restored \(indexedCount) files"
         }
     }

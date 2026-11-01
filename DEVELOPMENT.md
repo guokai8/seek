@@ -2853,6 +2853,40 @@ padding 挪进了有内容的那一支：空容器照样吃自己的 padding，�
 **还没做**：签名是 ad-hoc 的，没有 Developer ID、没有公证，所以发给别人时
 Gatekeeper 会拦（"无法验证开发者"），对方要右键打开或者自己去掉隔离属性。
 
+## 第 37 步：半满的索引不再假装自己是完整的
+
+扫描有 60 秒上限，撞上了索引就是半满的。引擎当时知道这件事（`sk_engine_scan_complete`），
+面板也会在footer 里写 `· scan cut short`。问题是**这个知道法只活在内存里**：
+
+- `persist.rs` 的 `Snapshot` 里没有任何一位记"这次扫完整了没有"；
+- `AppModel.startIndexing` 是**无条件**存快照的，`complete` 只 publish 不落盘；
+- `restoreIndex()` 只设 `indexedCount`，**没碰 `scanComplete`**，而它的默认值是
+  `true`（AppModel.swift:83）。
+
+所以从半满快照恢复回来之后，那句 `· scan cut short` 就没了 —— 第 883 行是
+`scanComplete ? count : "\(count) · scan cut short"`。应用声称自己是完整的。
+`ffi.rs:134` 那条注释写的正是"把半满索引报成完整的会误导"，只是这个道理没有
+跟着数据走到盘上。
+
+改掉：`Snapshot` 多一位 `complete`，`persist::save` 多收一个参数，
+`sk_engine_save_snapshot` 把 `inner.scan_complete` 写进去，
+`sk_engine_load_snapshot` 恢复时把它读回 `inner.scan_complete`，
+`restoreIndex()` 再把引擎的值抄给模型。
+
+格式版本 1 → 2，magic `SEEKIDX1` → `SEEKIDX2`。**不做兼容**：旧快照直接被拒，
+升上来之后第一次启动会整扫一遍。
+
+牙量过了：把 `inner.scan_complete = snapshot.complete` 这一行去掉，
+`a_restored_partial_index_still_knows_it_is_partial` 立刻红，还原后绿。
+
+**范围说清楚**：这一步修的是"半满的索引不再谎称完整"，不是"扫描不再超时"。
+60 秒上限还在，索引仍然要等某一次扫描真的跑完才会补齐 —— 只是现在它会一直
+老实说自己是半满的。
+
+Swift 那一行（`restoreIndex` 读 `engine.scanComplete`）没有直接的测试：
+`restoreIndex` 是 private，而造一份半满快照要走 core 的 API，Swift 侧没有对应
+的 FFI。我没有为了测试往产品里加接口。真相由 core 的两条测试钉住。
+
 ## 六、下一步的优先级（按 `fd-and-fzf-are-the-core` 规则）
 
 1. ~~**确认面板真的显示结果**~~ —— 第 9 步已修复并有测试守着
@@ -2907,13 +2941,16 @@ Gatekeeper 会拦（"无法验证开发者"），对方要右键打开或者自�
 21. ~~**菜单栏入口与界面精修**~~ —— 第 33 步已做（`NSStatusItem` + 菜单、
     选中行对比度、`exact` 芯片、键帽描边），顺带修掉 placeholder 从来没有被画
     出来（焦点一进字段 AppKit 就不画它了，而面板总是带焦点打开）
-22. **测试之间共用状态** —— 第 35 步量到，没有修：每条测试漏掉自己的
+22. ~~**半满索引谎称完整**~~ —— 第 37 步已做：快照记下扫描的完整性，恢复时
+    尊重它。原来列表里写的"直到重启"是乐观的 —— 重启恢复的就是那份半满快照。
+    **仍然留着的**：60 秒扫描上限本身，索引还是要等某次扫描跑完才补齐
+23. **测试之间共用状态** —— 第 35 步量到，没有修：每条测试漏掉自己的
     `AppModel`（各扫 258,373 条），并且共用用户真实的 `index.skidx`，
     所以两份测试同时跑会互相盖掉索引；也是整套跑三分多钟的原因
-23. **剩下的**：惰性 hydration、`content:` 操作符、
+24. **剩下的**：惰性 hydration、`content:` 操作符、
     最近打开过的文件、首启动权限引导、NSLog 进不了统一日志、
     apply 路径不遵守 `.gitignore`、
-    扫描超时后索引保持半满直到重启、
+    扫描 60 秒上限（索引要等某次扫描跑完才补齐）、
     文件夹的预览是一个空盒子（QuickLook 对目录没有内容，要自己列出目录条目）
 
 > 顺序不能颠倒：一个慢的搜索比丑的面板更糟，而一个丑的面板只有在搜索不慢的时候
