@@ -430,17 +430,27 @@ final class SearchEngine: @unchecked Sendable {
     /// It does not touch the engine, so it costs nothing to ask on every
     /// keystroke and never waits behind a search.
     nonisolated static func queryError(_ query: String) -> String? {
-        var buffer = [CChar](repeating: 0, count: 512)
+        // Bytes rather than `CChar`, because that is what the buffer
+        // holds: the core writes a UTF-8 message into it. Declaring it as
+        // the C type meant converting back at the end, and `String`'s own
+        // conversion from a `[CChar]` is deprecated — it has to scan for
+        // the terminator, which the core has already told us where to find.
+        var buffer = [UInt8](repeating: 0, count: 512)
 
         let length = query.withCString { queryPointer in
             buffer.withUnsafeMutableBufferPointer { out in
-                sk_query_error(queryPointer, out.baseAddress, Int32(out.count))
+                out.withMemoryRebound(to: CChar.self) { chars in
+                    sk_query_error(queryPointer, chars.baseAddress, Int32(chars.count))
+                }
             }
         }
 
         guard length > 0 else { return nil }
 
-        return String(cString: buffer)
+        // The count the core returns is the message's own length, without
+        // the terminator, so the bytes are decoded exactly rather than
+        // looked through for a NUL.
+        return String(decoding: buffer[..<Int(length)], as: UTF8.self)
     }
 
     /// How many bytes a path is assumed to take when sizing the buffer

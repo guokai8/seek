@@ -39,6 +39,46 @@ final class QueryErrorTests: XCTestCase {
         XCTAssertNotNil(SearchEngine.queryError("*[.pdf"), "a broken glob should be reported")
     }
 
+    /// The message comes back from the core as bytes, and the bytes are
+    /// the user's own query quoted back at them — so a query with
+    /// multi-byte characters in it is the case where the conversion from
+    /// the core's buffer to a Swift string has to be right. An ASCII
+    /// message survives almost any mistake in that conversion; a Chinese
+    /// one does not.
+    func test_a_broken_pattern_with_multibyte_characters_comes_back_whole() {
+        guard let message = SearchEngine.queryError("re:[文档") else {
+            XCTFail("an unclosed character class should be reported")
+            return
+        }
+
+        XCTAssertTrue(
+            message.contains("文档"),
+            "the query did not survive the trip through the core: \(message)"
+        )
+        XCTAssertFalse(
+            message.contains("\u{FFFD}"),
+            "the message came back with replacement characters in it: \(message)"
+        )
+
+        // Both ends of the buffer are pinned, because the message is read
+        // by the length the core reports and the two ways of getting that
+        // length wrong fail differently: reading one byte too far brings
+        // the terminator back with it, and reading one byte too few eats
+        // the last character. Neither shows up in the Chinese part, which
+        // sits in the middle.
+        // Escaped, because the thing this assertion catches is a NUL in
+        // the message — and a NUL printed raw ends the line the test
+        // failure is written on, so the report comes back empty.
+        XCTAssertFalse(
+            message.contains("\0"),
+            "the message was read past its end: \(String(reflecting: message))"
+        )
+        XCTAssertTrue(
+            message.hasSuffix("unclosed character class"),
+            "the message was cut short: \(message)"
+        )
+    }
+
     func test_content_search_is_refused_by_name() {
         guard let message = SearchEngine.queryError("content:hello") else {
             XCTFail("content: is not implemented and should say so")

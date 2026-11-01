@@ -26,18 +26,51 @@ export CARGO_TARGET_DIR="$CORE/target"
 # version its Info.plist promises.
 export MACOSX_DEPLOYMENT_TARGET="14.0"
 
-echo "==> building the core ($PROFILE)"
-cargo build --release --manifest-path "$CORE/Cargo.toml"
+# The bundle is universal: one binary that runs natively on Apple silicon
+# and on Intel. `build.sh` stays native-only, because that is the one you
+# wait for on every change; this is the one that ships.
+ARCHS=(arm64 x86_64)
+TRIPLES=(aarch64-apple-darwin x86_64-apple-darwin)
+
+echo "==> building the core ($PROFILE, ${ARCHS[*]})"
+for triple in "${TRIPLES[@]}"; do
+    if ! rustup target list --installed | grep -qx "$triple"; then
+        echo "the Rust target $triple is not installed" >&2
+        echo "  install it with: rustup target add $triple" >&2
+        exit 1
+    fi
+
+    cargo build --release --target "$triple" --manifest-path "$CORE/Cargo.toml"
+done
+
+# The two static libraries are joined into one universal archive, so that
+# the linker can take the slice it needs for each architecture it is asked
+# for. Naming a per-triple directory instead would mean linking twice by
+# hand and lipo-ing the results, which is the same work further downstream.
+UNIVERSAL="$CARGO_TARGET_DIR/universal/$PROFILE"
+mkdir -p "$UNIVERSAL"
+lipo -create \
+    "$CARGO_TARGET_DIR/aarch64-apple-darwin/$PROFILE/libseek_core.a" \
+    "$CARGO_TARGET_DIR/x86_64-apple-darwin/$PROFILE/libseek_core.a" \
+    -output "$UNIVERSAL/libseek_core.a"
 
 # The app links against the core as a static library, and it has to be the
 # one that was just built. Without this the app would link against the
 # debug build of the core, which does not have the newer entry points.
-export SEEK_CORE_DIR="$CARGO_TARGET_DIR/$PROFILE"
+export SEEK_CORE_DIR="$UNIVERSAL"
 
-echo "==> building the app ($PROFILE)"
-swift build --package-path "$APP" -c "$PROFILE"
+ARCH_FLAGS=()
+for arch in "${ARCHS[@]}"; do
+    ARCH_FLAGS+=(--arch "$arch")
+done
 
-BINARY="$APP/.build/$PROFILE/Seek"
+echo "==> building the app ($PROFILE, ${ARCHS[*]})"
+swift build --package-path "$APP" -c "$PROFILE" "${ARCH_FLAGS[@]}"
+
+# A multi-architecture build does not land where a single-architecture one
+# does: SwiftPM puts it under the platform's own products directory, with
+# the configuration capitalised.
+BINARY="$APP/.build/apple/Products/Release/Seek"
 if [ ! -e "$BINARY" ]; then
     echo "the app binary was not produced" >&2
     exit 1
@@ -65,6 +98,31 @@ rm -rf "$ICONSET"
 # The ad-hoc signature is enough for the app to run locally. A real
 # distribution build would sign it with a Developer ID.
 codesign --force --sign - "$BUNDLE" 2>/dev/null || true
+
+# The bundle says what it is, so the bundle is asked. A universal build
+# that quietly produced one slice — a missing Rust target, a lipo that
+# took the wrong input — looks exactly like a working build until it is
+# copied to the other kind of Mac.
+echo "==> checking the binary"
+BUILT_ARCHS="$(lipo -archs "$BUNDLE/Contents/MacOS/Seek")"
+for arch in "${ARCHS[@]}"; do
+    if ! grep -qw "$arch" <<< "$BUILT_ARCHS"; then
+        echo "the binary has no $arch slice (it has: $BUILT_ARCHS)" >&2
+        exit 1
+    fi
+done
+
+# Every slice has its own minimum, and only the one that was built on this
+# machine is covered by MACOSX_DEPLOYMENT_TARGET being right.
+MINIMA="$(otool -l "$BUNDLE/Contents/MacOS/Seek" | awk '/minos/ {print $2}')"
+for minimum in $MINIMA; do
+    if [ "$minimum" != "14.0" ]; then
+        echo "a slice is built for macOS $minimum rather than 14.0" >&2
+        exit 1
+    fi
+done
+
+echo "    $BUILT_ARCHS, macOS $(head -1 <<< "$MINIMA")+"
 
 echo "==> done: $BUNDLE"
 echo
