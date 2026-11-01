@@ -68,13 +68,7 @@ fn indexed_engine(root: &std::path::Path) -> *mut Engine {
 fn ask(engine: *mut Engine, text: &str) -> (Vec<String>, i32) {
     let query = CString::new(text).unwrap();
     let mut out = vec![
-        SearchResultEntry {
-            id: 0,
-            score: 0,
-            start: 0,
-            end: 0,
-            is_dir: 0,
-        };
+        SearchResultEntry::default();
         500
     ];
     let mut matched: i32 = 0;

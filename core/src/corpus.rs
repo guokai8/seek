@@ -40,6 +40,17 @@ pub struct CorpusEntry {
     /// This is what turns the relative path back into an absolute one,
     /// without walking the parent chain a second time.
     pub root: Option<u32>,
+    /// The file size in bytes, as the last scan saw it.
+    ///
+    /// This and `modified` are here for the same reason `is_dir` is: the
+    /// result row shows them, and the only other place they live is the
+    /// index, behind the maintenance lock that a rebuild holds for the
+    /// whole of a scan. Reading them from there per row would stall the
+    /// panel for as long as a scan takes. They cost sixteen bytes a
+    /// candidate -- about 4MB over a home directory.
+    pub size: u64,
+    /// The modification time, as a Unix timestamp in seconds.
+    pub modified: i64,
 }
 
 /// Where a candidate's path lives in the arena.
@@ -321,6 +332,8 @@ impl Corpus {
                 id,
                 is_dir: matches!(entry.kind, EntryKind::Directory),
                 root: root.map(|r| r as u32),
+                size: entry.size,
+                modified: entry.modified,
             },
             path,
             trim,
@@ -436,6 +449,23 @@ mod tests {
         );
         assert_eq!(corpus.paths().count(), corpus.entries.len());
         assert_eq!(corpus.paths().count(), corpus.trim_lengths.len());
+    }
+
+    /// A candidate's fixed cost is paid a quarter of a million times.
+    ///
+    /// The corpus is the one structure sized by the number of files rather
+    /// than by what the user is doing, so a field added here is multiplied
+    /// by the whole index: over a home directory of about 258,000 entries,
+    /// every eight bytes is 2MB that the app holds for as long as it runs.
+    /// This is a tripwire rather than a budget - changing the number is
+    /// fine, doing it without noticing is not.
+    #[test]
+    fn a_candidate_costs_what_it_is_supposed_to() {
+        assert_eq!(
+            std::mem::size_of::<CorpusEntry>(),
+            32,
+            "the per-candidate cost changed; see the doc comment above"
+        );
     }
 
     /// The overflow arena must not grow for ever.

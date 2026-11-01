@@ -27,6 +27,21 @@ enum Theme {
     /// The width of the panel.
     static let panelWidth: CGFloat = 720
 
+    /// The width of the time column in a result row.
+    ///
+    /// Fixed, not fitted. A column that sized itself to its content would
+    /// be a different width on every row -- "14:32" on one and
+    /// "3 Mar 2019" on the next -- and the eye would have nothing to run
+    /// down. This is wide enough for the longest of the three forms
+    /// `ResultMetadataFormat.time` produces.
+    static let metadataTimeWidth: CGFloat = 68
+
+    /// The width of the size column in a result row.
+    static let metadataSizeWidth: CGFloat = 58
+
+    /// How much of a row both metadata columns take together.
+    static let metadataWidth: CGFloat = metadataTimeWidth + metadataSizeWidth + 9
+
     /// The width of the preview column.
     ///
     /// Wide enough that a page of code or a photograph is worth looking

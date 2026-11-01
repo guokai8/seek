@@ -2887,6 +2887,112 @@ Swift 那一行（`restoreIndex` 读 `engine.scanComplete`）没有直接的测�
 `restoreIndex` 是 private，而造一份半满快照要走 core 的 API，Swift 侧没有对应
 的 FFI。我没有为了测试往产品里加接口。真相由 core 的两条测试钉住。
 
+## 第 38 步：结果行显示时间与大小，由用户决定显示哪些
+
+需求是"结果需要显示修改时间或者创建时间、文件大小，可以让用户来决定是否显示"。
+三个字段的成本差得很远，先量清楚再动手：
+
+| 字段 | 现状 | 代价 |
+|---|---|---|
+| 修改时间 | `FileEntry.modified` 已有，快照里也有 | 只差过 FFI |
+| 文件大小 | `FileEntry.size` 已有 | 同上，同一次改动白送 |
+| 创建时间 | **`ScannedEntry` 里从来没收过** | 扫描时白送（`scan.rs:471` 已经在调 `entry.metadata()`，`st_birthtime` 来自同一次 stat），但要进索引、进快照：格式再升一版，索引再多 2MB |
+
+用户选了只做修改时间。创建时间没做。
+
+### 为什么数据必须进 corpus
+
+第一个想法是行里按需查索引 —— 错的。`rebuild_index` **全程持 `inner` 的写锁**，
+整扫要几秒；而搜索刻意只走无锁的 `corpus` 快照（`Engine::corpus()` 只克隆一个
+`Arc`）。UI 按行去 `eng.read()` 的话，整扫期间面板会卡住几秒。
+`CorpusEntry.is_dir` 那条注释写的就是这个道理。
+
+所以 `size`/`modified` 进 `CorpusEntry`，跟着 `entry_for` 过 FFI。
+
+**代价是实打实的**：`CorpusEntry` 16 → 32 字节（`u64` 的对齐把它顶到 32，
+把 `modified` 换成 `u32` 也省不下来）。按量到的 258,373 条算是 **+4.1MB**，
+app 跑多久就占多久。加了一条绊线测试 `a_candidate_costs_what_it_is_supposed_to`
+钉住 32 —— 改这个数字可以，不知不觉改掉不行。corpus 是唯一一个按文件数
+线性增长的结构，这里每 8 个字节就是 2MB。
+
+搜索热路径没变慢：匹配扫的是 arena 和 `trim_lengths`，`entries[i]` 只在候选
+命中之后读一次。
+
+### 栽在一个构建陷阱上
+
+Rust 侧测试绿了（size 回来是 1234），Swift 侧同一条路径回来是 **0**。
+查到 `MemoryLayout<FlSearchResult>.size == 40`，C 头和 Rust 布局是一致的 ——
+问题在 `Package.swift`：
+
+```swift
+.unsafeFlags(["-L", coreLibrary, "-lseek_core"])
+```
+
+`unsafeFlags` **不建依赖边**。改了 Rust 核心之后 `swift test` 照旧链旧的 `.a`，
+不报错、不警告，数值静悄悄地是 0。强制重链之后三条测试立刻绿。
+改 FFI 的人都会踩，所以记在这里。
+
+### 窄面板自动隐藏：没做，前提是错的
+
+我给用户的两个布局选项里有"面板窄的时候自动隐藏元数据"，用户选了它。
+动手时发现**这个状态在当前实现里不存在**：结果列表是
+`.frame(width: Theme.panelWidth)`（ContentView.swift:248），永远 720pt；
+预览列是把**窗口**加宽（720 + 360），不是把列表压窄。
+所以"窄的时候"永远不会发生，按它写的代码是为一个到不了的分支服务的机器。
+按 AGENTS.md 的"不要投机抽象"，做成了定宽列：日期 68pt、大小 58pt、
+右对齐、等宽数字，路径继续从头部截断。面板哪天可以拖动改宽，再谈自动隐藏。
+
+### 显示与性能
+
+格式按"邻行会重复的部分不写"收窄：今天的文件只写时分，今年的写日月，
+更早的才花宽度写年份。`DateFormatter` 很慢，所以三个 formatter 建一次就留着，
+并且钉在主 actor 上（formatter 持可变状态、不是 `Sendable`，跨线程共享是数据竞争
+而不是节省）。只有可见行会被格式化 —— `LazyVStack` 不建别的行。
+
+开关跟 `showPreview` 走同一条路：`Preferences` 两个 `@AppStorage` 键、
+`AppModel` 两个 `@Published` 镜像、`observeSettings()` 里跟着
+`UserDefaults.didChangeNotification` 更新。设置窗口是开在面板上面的，
+不这么做的话勾选框要等下次召唤面板才生效，读起来就像一个没用的勾选框。
+
+### 渲染出来看，才看见两个问题
+
+把六行有代表性的数据（今天的、今年的、前年的、4.91GB 的、999 字节的、
+文件夹、超长路径）渲染成 PNG 看了一眼 —— 四位年份**装不下**：
+`Sep 27, 2025` 画出来是 `Sep 27, 2...`，把这个日期唯一值得显示的部分截掉了。
+改成两位年份（`Sep 27, 25`，75.1pt → 60pt）。
+
+这条已经变成测试：`test_every_form_of_the_time_fits_its_column` 用
+`NSAttributedString` 按行里真正用的等宽数字字体量三种形式的宽度，断言不超过
+68pt；`test_the_widest_size_fits_its_column` 对 `0 bytes` / `999 bytes` /
+`4.91 GB` 做同样的事。定宽列只有在最宽的那个装得下时才成立，
+而只有量一下才知道装不装得下。
+
+文件夹那一行顺带确认了：有日期、没有大小。
+
+### 牙量过了
+
+像素断言容易变成空断言，所以三条都变异过：
+把 `metadata` 改成永不绘制，"时间被画出来"和"大小会多画一些"立刻红；
+把三层 `if` 全摘掉（只摘内层不够 —— 外层的 `showsModified || showsSize`
+还挡着，第一次变异就是这么存活的），"两个都关时右侧必须是空的"从 0 变成 226 像素而红。
+`AppModel` 里两段监听摘掉，两条"开关要当场生效"都红。
+
+C 头和 Rust 结构体是同一份内存布局的两份声明，编译器不会替你比对 ——
+布局错了不会少一个字段，而是回来一个看起来很合理的数字。所以
+`ResultMetadataTests` 把文件写成测试自己挑的 4096 字节，断言用的是等号。
+
+`incremental_corpus.rs` 本来逐字段比的是 id / is_dir / root，**没有 size 和
+modified** —— 而"文件被改动"恰恰是这两个字段唯一会变的场合。补上之后又加了一条
+直说的断言（改完之后快照里就是 99 和 42，不是旧值）。把 `row()` 里的
+`size: entry.size` 改成 `size: 0`，这条立刻红。
+
+把日期模板改回四位年份，`test_every_form_of_the_time_fits_its_column` 红：
+75.1pt > 68pt。
+
+整套：core 111 个单元测试 + 全部集成套件绿，app 159 个测试 0 失败 0 警告。
+击键预算 `engine(r) = 125ms, shell overhead = 10ms (8%, 预算 31ms)` ——
+格式化没有加进去任何量得出来的东西。
+
 ## 六、下一步的优先级（按 `fd-and-fzf-are-the-core` 规则）
 
 1. ~~**确认面板真的显示结果**~~ —— 第 9 步已修复并有测试守着
@@ -2947,7 +3053,11 @@ Swift 那一行（`restoreIndex` 读 `engine.scanComplete`）没有直接的测�
 23. **测试之间共用状态** —— 第 35 步量到，没有修：每条测试漏掉自己的
     `AppModel`（各扫 258,373 条），并且共用用户真实的 `index.skidx`，
     所以两份测试同时跑会互相盖掉索引；也是整套跑三分多钟的原因
-24. **剩下的**：惰性 hydration、`content:` 操作符、
+24. ~~**结果行只有名字和路径**~~ —— 第 38 步已做：修改时间 + 文件大小，
+    两个开关各自可关。**没做的**：创建时间（要多收 `st_birthtime`、快照再升一版、
+    索引再多 2MB），以及"窄面板自动隐藏"（结果列表恒定 720pt，这个状态不存在）。
+    代价说清楚：`CorpusEntry` 16 → 32 字节，按 258,373 条算 +4.1MB 常驻
+25. **剩下的**：惰性 hydration、`content:` 操作符、
     最近打开过的文件、首启动权限引导、NSLog 进不了统一日志、
     apply 路径不遵守 `.gitignore`、
     扫描 60 秒上限（索引要等某次扫描跑完才补齐）、

@@ -16,6 +16,12 @@ struct ResultRow: View {
     /// Whether this row is the selected one.
     let isSelected: Bool
 
+    /// Whether to show when the entry last changed.
+    let showsModified: Bool
+
+    /// Whether to show how big the entry is.
+    let showsSize: Bool
+
     var body: some View {
         HStack(spacing: 9) {
             icon
@@ -45,9 +51,40 @@ struct ResultRow: View {
             }
 
             Spacer(minLength: 0)
+
+            metadata
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
+    }
+
+    /// When the entry last changed, and how big it is.
+    ///
+    /// Trailing and right-aligned, in the quietest of the three text
+    /// colours: the row is about the name, and a number that competed
+    /// with it would be a number in the way. The digits are monospaced so
+    /// that the columns line up down the list -- proportional digits make
+    /// a column of sizes look ragged even when every row is the same
+    /// width.
+    @ViewBuilder
+    private var metadata: some View {
+        if showsModified || showsSize {
+            HStack(spacing: 9) {
+                if showsModified {
+                    Text(hit.modifiedText ?? "")
+                        .frame(width: Theme.metadataTimeWidth, alignment: .trailing)
+                }
+
+                if showsSize {
+                    Text(hit.sizeText ?? "")
+                        .frame(width: Theme.metadataSizeWidth, alignment: .trailing)
+                }
+            }
+            .font(.resultPath)
+            .monospacedDigit()
+            .foregroundStyle(Theme.tertiary)
+            .lineLimit(1)
+        }
     }
 
     /// The icon that tells a folder from a file.

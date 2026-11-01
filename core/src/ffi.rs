@@ -371,6 +371,10 @@ pub struct SearchResultEntry {
     /// a stat call, and doing five hundred of them costs more than the
     /// search itself.
     pub is_dir: u8,
+    /// The file size in bytes, as the last scan saw it.
+    pub size: u64,
+    /// The modification time, as a Unix timestamp in seconds.
+    pub modified: i64,
 }
 
 /// Creates a new engine.
@@ -916,22 +920,22 @@ unsafe fn run_search(
 
 /// Turns one ranked result into the row the C ABI hands out.
 ///
-/// Whether the entry is a directory is not part of the ranking, so the
-/// search does not carry it and it is looked up here — a binary search per
-/// row, over the rows that are shown rather than the ones that matched.
+/// The kind, size and mtime are not part of the ranking, so the search does
+/// not carry them and they are looked up here — one binary search per row,
+/// over the rows that are shown rather than the ones that matched.
 fn entry_for(corpus: &Corpus, result: &SearchResult) -> SearchResultEntry {
-    let is_dir = corpus
+    let entry = corpus
         .position(result.id)
-        .and_then(|position| corpus.entries.get(position))
-        .map(|entry| u8::from(entry.is_dir))
-        .unwrap_or(0);
+        .and_then(|position| corpus.entries.get(position));
 
     SearchResultEntry {
         id: result.id,
         score: result.score,
         start: result.start,
         end: result.end,
-        is_dir,
+        is_dir: entry.map(|e| u8::from(e.is_dir)).unwrap_or(0),
+        size: entry.map(|e| e.size).unwrap_or(0),
+        modified: entry.map(|e| e.modified).unwrap_or(0),
     }
 }
 

@@ -167,6 +167,17 @@ final class AppModel: ObservableObject {
     /// it is read once here and written back whenever it is switched.
     @Published private(set) var isExactMatching: Bool = Preferences.shared.exactMatch
 
+    /// Whether a result row says when the entry last changed.
+    ///
+    /// Mirrored here for the same reason `isPreviewShown` is: the settings
+    /// window opens over the panel, so a checkbox that only took effect
+    /// the next time the panel was summoned would read as one that did
+    /// nothing.
+    @Published private(set) var showsModified: Bool = Preferences.shared.showModified
+
+    /// Whether a result row says how big the entry is.
+    @Published private(set) var showsSize: Bool = Preferences.shared.showSize
+
     /// Whether the preview column is drawn.
     ///
     /// Asking for the preview is not the same as having something to
@@ -220,6 +231,18 @@ final class AppModel: ObservableObject {
 
                     if shown != self.isPreviewShown {
                         self.isPreviewShown = shown
+                    }
+
+                    let modified = Preferences.shared.showModified
+
+                    if modified != self.showsModified {
+                        self.showsModified = modified
+                    }
+
+                    let size = Preferences.shared.showSize
+
+                    if size != self.showsSize {
+                        self.showsSize = size
                     }
 
                     // Both ways in lead here: the checkbox writes the

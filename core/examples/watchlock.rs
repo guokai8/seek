@@ -32,13 +32,7 @@ fn main() {
         let query = std::ffi::CString::new("r").unwrap();
         let mut results: Vec<seek_core::ffi::SearchResultEntry> = Vec::with_capacity(500);
         for _ in 0..500 {
-            results.push(seek_core::ffi::SearchResultEntry {
-                id: 0,
-                score: 0,
-                start: 0,
-                end: 0,
-                is_dir: 0,
-            });
+            results.push(seek_core::ffi::SearchResultEntry::default());
         }
 
         for round in 0..10 {

@@ -95,13 +95,7 @@ fn a_file_created_after_the_scan_is_found() {
 
     // The new file is found by a search.
     let query = CString::new("appeared").unwrap();
-    let mut results: [SearchResultEntry; 16] = std::array::from_fn(|_| SearchResultEntry {
-        id: 0,
-        score: 0,
-        start: 0,
-        end: 0,
-        is_dir: 0,
-    });
+    let mut results: [SearchResultEntry; 16] = std::array::from_fn(|_| SearchResultEntry::default());
 
     let hits = unsafe {
         sk_engine_search(
