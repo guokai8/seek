@@ -124,7 +124,56 @@ done
 
 echo "    $BUILT_ARCHS, macOS $(head -1 <<< "$MINIMA")+"
 
+# A disk image, because that is what gets sent to someone else. A bare
+# .app loses its signature travelling through most things that carry
+# files; a .dmg arrives as the one file it left as, and the symlink next
+# to it makes installing the drag everyone already knows.
+echo "==> making the disk image"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$BUNDLE/Contents/Info.plist")"
+DMG="$OUT/Seek-$VERSION.dmg"
+STAGE="$OUT/dmg"
+
+rm -rf "$STAGE" "$DMG"
+mkdir -p "$STAGE"
+cp -R "$BUNDLE" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+
+hdiutil create -volname "Seek $VERSION" -srcfolder "$STAGE" \
+    -ov -format UDZO "$DMG" > /dev/null
+rm -rf "$STAGE"
+
+# The image is asked what it contains, for the same reason the binary is:
+# an image built from a half-assembled bundle mounts and looks right.
+echo "==> checking the disk image"
+MOUNT="$(mktemp -d)"
+hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -quiet
+INSIDE="$MOUNT/Seek.app"
+if [ ! -x "$INSIDE/Contents/MacOS/Seek" ]; then
+    hdiutil detach "$MOUNT" -quiet || true
+    echo "the disk image has no runnable app in it" >&2
+    exit 1
+fi
+DMG_ARCHS="$(lipo -archs "$INSIDE/Contents/MacOS/Seek")"
+for arch in "${ARCHS[@]}"; do
+    if ! grep -qw "$arch" <<< "$DMG_ARCHS"; then
+        hdiutil detach "$MOUNT" -quiet || true
+        echo "the app in the image has no $arch slice (it has: $DMG_ARCHS)" >&2
+        exit 1
+    fi
+done
+codesign --verify --deep "$INSIDE" 2>/dev/null \
+    || echo "    note: the signature is ad-hoc, so Gatekeeper will ask on first open"
+hdiutil detach "$MOUNT" -quiet
+rmdir "$MOUNT" 2>/dev/null || true
+
+echo "    $DMG_ARCHS, $(du -h "$DMG" | cut -f1)"
+
 echo "==> done: $BUNDLE"
+echo "==> done: $DMG"
 echo
 echo "    install it with:"
 echo "      cp -R \"$BUNDLE\" /Applications/"
+echo
+echo "    or send the disk image:"
+echo "      $DMG"
