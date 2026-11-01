@@ -1,0 +1,5 @@
+module SeekCore {
+    header "SeekCore.h"
+    link "seek_core"
+    export *
+}

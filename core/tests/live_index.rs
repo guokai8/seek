@@ -6,7 +6,7 @@
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
-use fuzzylite_core::ffi::*;
+use seek_core::ffi::*;
 
 /// Waits for the watcher to report a change that mentions `needle`.
 fn wait_for_change(engine: *mut Engine, buffer: &mut [i8], needle: &str) -> bool {
@@ -14,7 +14,7 @@ fn wait_for_change(engine: *mut Engine, buffer: &mut [i8], needle: &str) -> bool
 
     while Instant::now() < deadline {
         let found = unsafe {
-            fl_engine_poll_changes(engine, buffer.as_mut_ptr(), buffer.len() as i32)
+            sk_engine_poll_changes(engine, buffer.as_mut_ptr(), buffer.len() as i32)
         };
         assert!(found >= 0);
 
@@ -47,22 +47,29 @@ fn wait_for_change(engine: *mut Engine, buffer: &mut [i8], needle: &str) -> bool
 
 #[test]
 fn a_file_created_after_the_scan_is_found() {
-    let root = std::env::temp_dir().join(format!("fuzzylite-live-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("seek-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
 
-    let engine = fl_engine_new();
-    let roots = CString::new(root.to_str().unwrap()).unwrap();
-    unsafe { fl_engine_set_roots(engine, roots.as_ptr()) };
+    // The root is taken as the filesystem reports it, which is what the
+    // watcher reports too: the temporary directory lives under `/var`, a
+    // symbolic link to `/private/var`, and FSEvents says the latter. A
+    // change whose path does not lie under a root is not applied, so a
+    // test that mixed the two forms would be testing nothing.
+    let root = std::fs::canonicalize(&root).unwrap();
 
-    fl_engine_start_scan(engine);
-    while fl_engine_scan_finished(engine) == 0 {
+    let engine = sk_engine_new();
+    let roots = CString::new(root.to_str().unwrap()).unwrap();
+    unsafe { sk_engine_set_roots(engine, roots.as_ptr()) };
+
+    sk_engine_start_scan(engine);
+    while sk_engine_scan_finished(engine) == 0 {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let before = fl_engine_finish_scan(engine);
+    let before = sk_engine_finish_scan(engine);
 
     // The watcher is started after the scan.
-    assert_eq!(fl_engine_start_watch(engine), 0);
+    assert_eq!(sk_engine_start_watch(engine), 0);
 
     // The file is created after the scan.
     let new_file = root.join("appeared_later.txt");
@@ -83,7 +90,7 @@ fn a_file_created_after_the_scan_is_found() {
         is_dir: 0,
     };
 
-    let after = unsafe { fl_engine_apply_changes(engine, &change, 1) };
+    let after = unsafe { sk_engine_apply_changes(engine, &change, 1) };
     assert!(after > before, "the index did not grow");
 
     // The new file is found by a search.
@@ -93,19 +100,21 @@ fn a_file_created_after_the_scan_is_found() {
         score: 0,
         start: 0,
         end: 0,
+        is_dir: 0,
     });
 
     let hits = unsafe {
-        fl_engine_search(
+        sk_engine_search(
             engine,
             query.as_ptr(),
             results.as_mut_ptr(),
             results.len() as i32,
+            std::ptr::null_mut(),
         )
     };
 
     assert!(hits > 0, "the new file was not found by the search");
 
-    unsafe { fl_engine_free(engine) };
+    unsafe { sk_engine_free(engine) };
     let _ = std::fs::remove_dir_all(&root);
 }

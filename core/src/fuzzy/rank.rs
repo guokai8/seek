@@ -16,7 +16,7 @@
 //! hundreds of millions of character operations. Instead each candidate's
 //! keys are computed once, and the comparator only compares numbers.
 
-use super::matcher::FuzzyMatcher;
+use super::matcher::{Direction, FuzzyMatcher};
 
 /// A sort criterion, mirroring fzf's `criterion` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,45 @@ pub enum Criterion {
 /// The default tiebreak chain, matching fzf's default `--tiebreak=length`.
 pub const DEFAULT_CRITERIA: &[Criterion] = &[Criterion::Score, Criterion::Length];
 
+/// The tiebreak chain fzf uses under `--scheme=path`.
+///
+/// fzf does not only change the scoring when the path scheme is chosen; it
+/// also changes the tiebreak, to `pathname,length`. Leaving the chain at
+/// `length` while using the path scheme is neither of fzf's two behaviours,
+/// so the scheme carries its chain with it. See [`Scheme::criteria`].
+pub const PATH_CRITERIA: &[Criterion] =
+    &[Criterion::Score, Criterion::Pathname, Criterion::Length];
+
+/// The scan direction a tiebreak chain calls for.
+///
+/// Mirrors fzf's choice in `core.go`: the criteria do not agree about which
+/// of several equally scoring occurrences is the interesting one, so the
+/// chain decides the direction of the matcher.
+///
+/// `Pathname` and `End` want the match as late in the text as possible, and
+/// `Begin` wants it as early as possible. For `Pathname` this is the whole
+/// point of the criterion: in `libparse/src/main.rs` the pattern `a` can be
+/// matched in the directory or in the file name, and only the later of the
+/// two makes it a match on the file name. Scanning forward would credit it
+/// to the directory and rank the entry behind every file-name match.
+///
+/// fzf walks the chain from the back towards the front, so the *earliest*
+/// criterion has the final say. The score is always first and has no
+/// preference, so it is skipped.
+pub fn scan_direction(criteria: &[Criterion]) -> Direction {
+    let mut direction = Direction::Forward;
+
+    for &criterion in criteria.iter().skip(1).rev() {
+        match criterion {
+            Criterion::End | Criterion::Pathname => direction = Direction::Backward,
+            Criterion::Begin => direction = Direction::Forward,
+            Criterion::Score | Criterion::Chunk | Criterion::Length => {}
+        }
+    }
+
+    direction
+}
+
 /// The precomputed sort keys of a candidate.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SortKeys {
@@ -57,8 +96,16 @@ pub struct SortKeys {
 
 impl SortKeys {
     /// Computes the sort keys for a candidate.
+    ///
+    /// `trim_length` is the candidate's length with surrounding whitespace
+    /// removed. It is passed in rather than computed here because it does
+    /// not depend on the query: the corpus works it out once when it is
+    /// built, instead of once per candidate per keystroke. fzf does the
+    /// same, caching it on the item the first time it is asked for. Use
+    /// [`trim_length`] for a candidate that has no corpus behind it.
     pub fn compute(
         text: &str,
+        trim_length: u16,
         score: i32,
         start: i32,
         end: i32,
@@ -71,18 +118,35 @@ impl SortKeys {
             ..Default::default()
         };
 
+        // fzf starts every sort point at `MaxUint16` and only lowers it when
+        // the criterion has something to say. A criterion that does not
+        // apply therefore ranks *last*, not first.
+        //
+        // The offsets are valid only when the match is a real span. An empty
+        // query matches everything with no span, and fzf leaves the
+        // span-based criteria at their worst value in that case.
+        let valid = end > start;
+
         // Only the criteria that are actually used are computed.
         for &criterion in criteria {
             match criterion {
                 Criterion::Score => {}
                 Criterion::Length => {
-                    keys.trim_length = trim_length(text);
+                    keys.trim_length = trim_length;
                 }
                 Criterion::Chunk => {
-                    keys.chunk_length = chunk_length(text, start, end);
+                    keys.chunk_length = if valid {
+                        chunk_length(text, start, end)
+                    } else {
+                        u16::MAX
+                    };
                 }
                 Criterion::Pathname => {
-                    keys.pathname = pathname_score(text, start);
+                    keys.pathname = if valid {
+                        pathname_score(text, start)
+                    } else {
+                        u16::MAX
+                    };
                 }
                 Criterion::Begin | Criterion::End => {}
             }
@@ -123,12 +187,27 @@ pub fn compare_keys(
     Ordering::Equal
 }
 
-/// The length of the text after trailing whitespace is trimmed.
-fn trim_length(text: &str) -> u16 {
-    text.trim_end_matches(char::is_whitespace)
-        .chars()
-        .count()
-        .min(u16::MAX as usize) as u16
+/// The number of characters in `text` once surrounding whitespace is gone.
+///
+/// Mirrors fzf's `Chars.TrimLength`, which trims *both* ends — it takes the
+/// first and last non-space characters and measures between them.
+///
+/// The result does not depend on the query, so it is computed once per
+/// candidate when the corpus is built and handed to [`SortKeys::compute`].
+/// fzf caches it on the item for the same reason.
+pub fn trim_length(text: &str) -> u16 {
+    let trimmed = text.trim_matches(char::is_whitespace);
+
+    // A path is almost always ASCII, and for ASCII the byte count is the
+    // character count. `is_ascii` is a vectorised scan, where counting
+    // characters decodes the string one at a time.
+    let count = if trimmed.is_ascii() {
+        trimmed.len()
+    } else {
+        trimmed.chars().count()
+    };
+
+    count.min(u16::MAX as usize) as u16
 }
 
 /// The length of the whitespace-delimited chunk that contains the match.
@@ -167,26 +246,78 @@ fn char_index_of(chars: &[char], byte_offset: usize) -> usize {
     chars.len()
 }
 
-/// The `byPathname` criterion: how far the match is from the last path
-/// separator. A smaller distance is better.
+/// The `byPathname` criterion: fzf prefers a match that lands in the file
+/// name of the path rather than in one of its directories.
 ///
-/// Mirrors fzf: the value is `minBegin - lastDelim`, so a match right after
-/// a separator scores higher than one deep inside a directory name.
+/// Mirrors fzf's `byPathname`: when the match starts at or after the last
+/// separator — that is, inside the file name — the value is
+/// `minBegin - lastDelim`, so a match right after the separator wins. When
+/// the match starts *before* the last separator it is a match on a
+/// directory, and fzf leaves the value at its worst, which puts those
+/// entries behind every match in a file name.
+///
+/// Returning the best value for a directory match, rather than the worst,
+/// inverts the whole criterion. A path with no separator at all has
+/// `lastDelim == -1`, which is less than any start, so it is scored as a
+/// file name — which is what it is.
+///
+/// This runs for every candidate that matches, so it walks the text once
+/// and allocates nothing. Collecting the characters into a vector first
+/// would be clearer to read and would also put a heap allocation and a full
+/// copy of the path on the hot path of every keystroke.
 fn pathname_score(text: &str, start: i32) -> u16 {
-    let chars: Vec<char> = text.chars().collect();
-    let start_idx = char_index_of(&chars, start.max(0) as usize);
+    let start_byte = start.max(0) as usize;
 
+    // The match start as a *character* index and the last separator as a
+    // *byte* offset, which is the pair fzf compares:
+    //
+    //     lastDelim := -1
+    //     s := item.text.ToString()
+    //     for i := len(s) - 1; i >= 0; i-- {
+    //         if s[i] == '/' || s[i] == '\\' { lastDelim = i; break }
+    //     }
+    //     if lastDelim <= minBegin { val = AsUint16(minBegin - lastDelim) }
+    //
+    // `s[i]` indexes a Go string, so `lastDelim` counts bytes, while
+    // `minBegin` comes from the match offsets and counts runes. On an ASCII
+    // path the two are the same number and the mix never shows. On a path
+    // with a multi-byte character they are not: `a/я/hellp.txt` gets a
+    // distance of 0 and outranks every ASCII path, and `a/背/hellp.txt`
+    // comes out with `lastDelim > minBegin` and is read as a match that
+    // spans a separator, which is the worst value there is.
+    //
+    // Counting both in characters is the defensible reading and is what
+    // this did until the ranking was compared with fzf's over a corpus with
+    // Chinese directory names in it. A ranking that disagrees with fzf is a
+    // bug, so the mix is reproduced rather than corrected.
+    //
+    // Only the index differs, not which separator is found: `/` and `\\`
+    // are ASCII, and no continuation byte of a multi-byte character can
+    // equal them.
+    let mut start_idx: i32 = -1;
     let mut last_delim: i32 = -1;
-    for i in (0..chars.len()).rev() {
-        if chars[i] == '/' || chars[i] == '\\' {
-            last_delim = i as i32;
-            break;
+    let mut count: i32 = 0;
+
+    for (byte, c) in text.char_indices() {
+        if start_idx < 0 && byte >= start_byte {
+            start_idx = count;
         }
+        if c == '/' || c == '\\' {
+            last_delim = byte as i32;
+        }
+        count += 1;
     }
-    if last_delim <= start_idx as i32 {
-        (start_idx as i32 - last_delim).min(u16::MAX as i32) as u16
+
+    // A start past the end of the text clamps to the end, which is what
+    // indexing the characters would have done.
+    if start_idx < 0 {
+        start_idx = count;
+    }
+
+    if last_delim <= start_idx {
+        (start_idx - last_delim).min(u16::MAX as i32) as u16
     } else {
-        0
+        u16::MAX
     }
 }
 
@@ -206,11 +337,18 @@ pub struct RankedMatch {
 }
 
 /// Ranks candidate strings against a pattern using fzf's criteria chain.
+///
+/// The matcher is taken by value so that the chain's scan direction can be
+/// bound to it here. Handing in a matcher that was built with a different
+/// direction than the chain calls for would rank the candidates by offsets
+/// the matcher never meant, so the two are not allowed to drift apart.
 pub fn rank_candidates(
-    matcher: &FuzzyMatcher,
+    matcher: FuzzyMatcher,
     candidates: &[&str],
     criteria: &[Criterion],
 ) -> Vec<RankedMatch> {
+    let matcher = matcher.scanning(scan_direction(criteria));
+
     let mut results: Vec<(usize, SortKeys, Vec<i32>)> = candidates
         .iter()
         .enumerate()
@@ -219,7 +357,8 @@ pub fn rank_candidates(
             if !m.is_match() {
                 return None;
             }
-            let keys = SortKeys::compute(text, m.score, m.start, m.end, criteria);
+            let keys =
+                SortKeys::compute(text, trim_length(text), m.score, m.start, m.end, criteria);
             Some((index, keys, positions))
         })
         .collect();

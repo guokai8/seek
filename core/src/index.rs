@@ -141,6 +141,22 @@ pub struct Index {
     pub updated_at: i64,
     /// The number of entries removed since the index was built.
     pub removed: u32,
+    /// The entries that have changed since the snapshot was last published.
+    ///
+    /// A watcher batch touches a handful of entries out of a quarter of a
+    /// million, and rebuilding the whole searchable corpus for them costs
+    /// a fresh `String` for every path in the index. The index records
+    /// what it changed, so that the snapshot can be brought up to date in
+    /// place instead. See [`Corpus::updated`](crate::corpus::Corpus::updated).
+    ///
+    /// It is recorded here rather than returned to the caller because
+    /// `upsert` creates the missing parent directories on its way, and
+    /// those are new rows that the caller never hears about.
+    ///
+    /// It is not part of the snapshot on disk: an index that has just been
+    /// restored has nothing pending, because its corpus is built whole.
+    #[serde(skip)]
+    dirty: Vec<EntryId>,
 }
 
 impl Index {
@@ -153,7 +169,15 @@ impl Index {
     pub fn add(&mut self, entry: FileEntry) -> EntryId {
         let id = self.entries.len() as u32;
         self.entries.push(entry);
+        self.dirty.push(id);
         id
+    }
+
+    /// Takes the entries that have changed since this was last called.
+    ///
+    /// The caller publishes a snapshot for them and the list starts over.
+    pub fn take_dirty(&mut self) -> Vec<EntryId> {
+        std::mem::take(&mut self.dirty)
     }
 
     /// Adds an entry with a name, interning the name first.
@@ -192,6 +216,54 @@ impl Index {
     /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Rebuilds the path of an entry relative to the root it is under.
+    ///
+    /// The root's own name is not included, so the path of a file directly
+    /// in the root is just its name. This is what `fd` prints when it is
+    /// given a root, and it is what the matcher scores.
+    ///
+    /// The root's prefix is the same for every entry under it, so
+    /// searching it is wasted work: it is the same characters for all of
+    /// them, and no user ever types the home directory to find a file.
+    pub fn relative_path(&self, id: EntryId) -> Option<String> {
+        self.relative_path_with_root(id).map(|(path, _)| path)
+    }
+
+    /// Rebuilds the relative path of an entry and says which root it is
+    /// under.
+    ///
+    /// The root comes back as its position in [`Index::config_roots`], so
+    /// that the absolute path can be rebuilt later without walking the
+    /// parent chain a second time. It is `None` when the chain does not
+    /// end at a known root, which is what happens to an index that was
+    /// built without one.
+    pub fn relative_path_with_root(&self, id: EntryId) -> Option<(String, Option<usize>)> {
+        let mut parts: Vec<&str> = Vec::new();
+        let mut current = self.entries.get(id as usize)?;
+        let mut root_id = id;
+
+        loop {
+            let name = self.names.get(current.name)?;
+            parts.push(name);
+            match current.parent {
+                Some(parent) => {
+                    root_id = parent;
+                    current = self.entries.get(parent as usize)?;
+                }
+                None => break,
+            }
+        }
+
+        parts.reverse();
+
+        // The root's own name is dropped, because the relative path starts
+        // below the root.
+        let root = self.roots.iter().position(|&root| root == root_id);
+        let start = if root.is_some() { 1 } else { 0 };
+
+        Some((parts[start..].join("/"), root))
     }
 
     /// Rebuilds the full path of an entry by walking up to its root.
@@ -302,28 +374,70 @@ impl Index {
             .map(|i| i as EntryId)
     }
 
-    /// Finds the id of the directory at `path`, if it is indexed.
-    fn find_dir_by_path(&self, path: &Path) -> Option<EntryId> {
-        let mut parts: Vec<String> = Vec::new();
-        for component in path.components() {
-            if let std::path::Component::Normal(part) = component {
-                parts.push(part.to_string_lossy().to_string());
+    /// Resolves a path to the root it lies under and the parts below it.
+    ///
+    /// Everything the index holds hangs off one of its roots, and a path
+    /// outside them all does not belong in it.
+    ///
+    /// This is what anchors a path handed in from the outside — by the
+    /// watcher — to the tree the scan built. Walking from the first
+    /// component instead never matched the root entry, because the first
+    /// component has no parent to be a child of. The effect was that
+    /// [`Index::find_dir_by_path`] never found anything, so a deleted file
+    /// was never removed, and [`Index::ensure_dir`] built a fresh chain of
+    /// ancestors for every path it was given, so the index grew without
+    /// bound and showed the same file twice.
+    ///
+    /// The longest matching root wins, so a root nested inside another
+    /// resolves to the nearer one.
+    fn resolve_root(&self, path: &Path) -> Option<(EntryId, Vec<String>)> {
+        let mut best: Option<(usize, EntryId, Vec<String>)> = None;
+
+        for (position, root) in self.config_roots.iter().enumerate() {
+            let Some(&id) = self.roots.get(position) else {
+                continue;
+            };
+            let Ok(rest) = path.strip_prefix(root) else {
+                continue;
+            };
+
+            let depth = root.components().count();
+            if best.as_ref().is_some_and(|(best, _, _)| *best >= depth) {
+                continue;
             }
+
+            let parts = rest
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => {
+                        Some(part.to_string_lossy().to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            best = Some((depth, id, parts));
         }
 
-        let mut current: Option<EntryId> = None;
+        best.map(|(_, id, parts)| (id, parts))
+    }
+
+    /// Finds the id of the directory at `path`, if it is indexed.
+    fn find_dir_by_path(&self, path: &Path) -> Option<EntryId> {
+        let (root, parts) = self.resolve_root(path)?;
+
+        let mut current = root;
         for name in &parts {
-            let parent = current?;
             let index = self.entries.iter().position(|e| {
                 !e.removed
-                    && e.parent == Some(parent)
+                    && e.parent == Some(current)
                     && e.kind == EntryKind::Directory
                     && self.names.get(e.name) == Some(name.as_str())
             })?;
-            current = Some(index as EntryId);
+            current = index as EntryId;
         }
 
-        current
+        Some(current)
     }
 
     /// Finds the id of the directory at `path`, creating it if needed.
@@ -331,32 +445,24 @@ impl Index {
     /// The path is walked from the deepest known ancestor downwards, so only
     /// the missing tail of the path has to be created.
     pub fn ensure_dir(&mut self, path: &Path) -> Option<EntryId> {
-        let mut current: Option<EntryId> = None;
+        let (root, parts) = self.resolve_root(path)?;
 
-        let mut parts: Vec<String> = Vec::new();
-        for component in path.components() {
-            if let std::path::Component::Normal(part) = component {
-                parts.push(part.to_string_lossy().to_string());
-            }
-        }
-
+        let mut current = root;
         for name in parts {
-            let existing = current.and_then(|parent| {
-                self.entries.iter().position(|e| {
-                    !e.removed
-                        && e.parent == Some(parent)
-                        && e.kind == EntryKind::Directory
-                        && self.names.get(e.name) == Some(name.as_str())
-                })
+            let existing = self.entries.iter().position(|e| {
+                !e.removed
+                    && e.parent == Some(current)
+                    && e.kind == EntryKind::Directory
+                    && self.names.get(e.name) == Some(name.as_str())
             });
 
             current = match existing {
-                Some(id) => Some(id as EntryId),
-                None => Some(self.add_named(current, &name, EntryKind::Directory, 0, 0)),
+                Some(id) => id as EntryId,
+                None => self.add_named(Some(current), &name, EntryKind::Directory, 0, 0),
             };
         }
 
-        current
+        Some(current)
     }
 
     /// Adds or replaces an entry at `path`.
@@ -378,10 +484,25 @@ impl Index {
             Some(index) => {
                 let id = index as EntryId;
                 let entry = &mut self.entries[index];
+
+                // An entry that already holds what the watcher reports has
+                // not changed. Saying that it has costs a published
+                // snapshot, and the watcher reports plenty of writes that
+                // leave the entry exactly as it was.
+                let changed = entry.kind != kind
+                    || entry.size != size
+                    || entry.modified != modified
+                    || entry.removed;
+
                 entry.kind = kind;
                 entry.size = size;
                 entry.modified = modified;
                 entry.removed = false;
+
+                if changed {
+                    self.dirty.push(id);
+                }
+
                 Some(id)
             }
             None => Some(self.add_named(Some(parent), &name, kind, size, modified)),
@@ -406,6 +527,7 @@ impl Index {
             }
             entry.removed = true;
             self.removed += 1;
+            self.dirty.push(current);
 
             let children: Vec<EntryId> = self
                 .entries
@@ -449,6 +571,11 @@ impl Index {
 
         self.entries = keep;
         self.removed = 0;
+
+        // The ids have all moved, so a pending change now names the wrong
+        // entry. Compaction is only done when the whole corpus is rebuilt
+        // anyway, which needs no pending list.
+        self.dirty.clear();
     }
 }
 

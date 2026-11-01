@@ -1,4 +1,4 @@
-//! fuzzylite core: a lightweight macOS file search engine.
+//! seek core: a lightweight macOS file search engine.
 //!
 //! The engine combines two ideas:
 //!

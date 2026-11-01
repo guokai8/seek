@@ -4,11 +4,11 @@
 //! This test verifies that the walk finishes and that every entry is
 //! delivered, which is what the app relies on.
 
-use fuzzylite_core::scan::{scan_blocking, ScanConfig};
+use seek_core::scan::{scan_blocking, ScanConfig};
 
 #[test]
 fn the_scan_delivers_every_entry() {
-    let root = std::env::temp_dir().join(format!("fuzzylite-scan-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("seek-scan-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 
     // A tree with a known number of files.
@@ -40,7 +40,7 @@ fn the_scan_delivers_every_entry() {
 fn the_scan_finishes_even_without_a_consumer() {
     // The walker must not block when the buffer is never drained, which is
     // what happens when the app waits for the scan before reading it.
-    let root = std::env::temp_dir().join(format!("fuzzylite-scan2-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("seek-scan2-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
 
     std::fs::create_dir_all(&root).unwrap();
@@ -53,7 +53,7 @@ fn the_scan_finishes_even_without_a_consumer() {
         ..Default::default()
     };
 
-    let mut scanner = fuzzylite_core::scan::Scanner::start(config).unwrap();
+    let mut scanner = seek_core::scan::Scanner::start(config).unwrap();
 
     // Wait for the walk without reading anything.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -66,11 +66,9 @@ fn the_scan_finishes_even_without_a_consumer() {
     }
 
     // Now the entries can be drained.
-    let mut count = 0;
-    while scanner.next_entry().is_some() {
-        count += 1;
-    }
-    assert_eq!(count, 50);
+    let mut entries = Vec::new();
+    while scanner.drain_into(&mut entries) > 0 {}
+    assert_eq!(entries.len(), 50);
 
     let _ = std::fs::remove_dir_all(&root);
 }

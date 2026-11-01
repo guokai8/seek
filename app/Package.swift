@@ -8,32 +8,37 @@ import Foundation
 // build in `target/release`.
 let coreTarget = ProcessInfo.processInfo.environment["CARGO_TARGET_DIR"]
     ?? "../core/target"
-let coreLibrary = ProcessInfo.processInfo.environment["FUZZYLITE_CORE_DIR"]
+let coreLibrary = ProcessInfo.processInfo.environment["SEEK_CORE_DIR"]
     ?? "\(coreTarget)/debug"
 
 let package = Package(
-    name: "Fuzzylite",
+    name: "Seek",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "Fuzzylite", targets: ["Fuzzylite"])
+        .executable(name: "Seek", targets: ["Seek"])
     ],
     targets: [
         // The C interface of the Rust core, exposed to Swift through a
         // module map.
         .target(
-            name: "FuzzyliteCCore",
-            path: "Sources/FuzzyliteCCore",
+            name: "SeekCCore",
+            path: "Sources/SeekCCore",
             linkerSettings: [
                 .unsafeFlags([
                     "-L", coreLibrary,
-                    "-lfuzzylite_core",
+                    "-lseek_core",
                 ])
             ]
         ),
         .executableTarget(
-            name: "Fuzzylite",
-            dependencies: ["FuzzyliteCCore"],
-            path: "Sources/Fuzzylite"
+            name: "Seek",
+            dependencies: ["SeekCCore"],
+            path: "Sources/Seek"
+        ),
+        .testTarget(
+            name: "SeekTests",
+            dependencies: ["Seek"],
+            path: "Tests/SeekTests"
         ),
     ]
 )

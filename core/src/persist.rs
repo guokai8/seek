@@ -29,7 +29,7 @@ use crate::index::Index;
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The magic bytes at the start of a snapshot file.
-const MAGIC: &[u8; 8] = b"FUZZYLIT";
+const MAGIC: &[u8; 8] = b"SEEKIDX1";
 
 /// The header of a snapshot container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +129,7 @@ pub fn load(path: &Path, roots: &[PathBuf]) -> Result<Snapshot, LoadError> {
     let bytes = std::fs::read(path).map_err(LoadError::Io)?;
 
     if bytes.len() < 16 || &bytes[..8] != MAGIC {
-        return Err(LoadError::Format("not a fuzzylite snapshot".into()));
+        return Err(LoadError::Format("not a seek snapshot".into()));
     }
 
     let header_len = u32::from_le_bytes([
@@ -198,15 +198,15 @@ fn same_roots(a: &[PathBuf], b: &[PathBuf]) -> bool {
 /// The file lives in the app's support directory, which is created if it
 /// does not exist yet.
 pub fn default_snapshot_path() -> PathBuf {
-    let base = std::env::var_os("FUZZYLITE_DATA_DIR")
+    let base = std::env::var_os("SEEK_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let home = crate::scan::home_dir();
-            home.join("Library/Application Support/Fuzzylite")
+            home.join("Library/Application Support/Seek")
         });
 
     let _ = std::fs::create_dir_all(&base);
-    base.join("index.flidx")
+    base.join("index.skidx")
 }
 
 #[cfg(test)]
@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn round_trips_through_a_snapshot() {
-        let dir = std::env::temp_dir().join(format!("fuzzylite-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("seek-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.flidx");
+        let path = dir.join("index.skidx");
 
         let index = sample_index();
         let roots = vec![PathBuf::from("/home")];
@@ -245,9 +245,9 @@ mod tests {
 
     #[test]
     fn rejects_a_snapshot_for_other_roots() {
-        let dir = std::env::temp_dir().join(format!("fuzzylite-test-roots-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("seek-test-roots-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.flidx");
+        let path = dir.join("index.skidx");
 
         save(&sample_index(), &[PathBuf::from("/home")], &path).unwrap();
 
@@ -259,9 +259,9 @@ mod tests {
 
     #[test]
     fn rejects_a_corrupt_snapshot() {
-        let dir = std::env::temp_dir().join(format!("fuzzylite-test-corrupt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("seek-test-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.flidx");
+        let path = dir.join("index.skidx");
 
         save(&sample_index(), &[], &path).unwrap();
 

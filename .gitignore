@@ -5,6 +5,9 @@
 /app/.build/
 /app/.swiftpm/
 
+# The rendered snapshots
+/app/build/
+
 # The packaged app
 /build/
 

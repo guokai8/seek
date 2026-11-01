@@ -7,27 +7,27 @@
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
-use fuzzylite_core::ffi::*;
+use seek_core::ffi::*;
 
 #[test]
 fn the_watcher_reports_new_files() {
-    let root = std::env::temp_dir().join(format!("fuzzylite-watch-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("seek-watch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
 
-    let engine = fl_engine_new();
+    let engine = sk_engine_new();
     let roots = CString::new(root.to_str().unwrap()).unwrap();
-    unsafe { fl_engine_set_roots(engine, roots.as_ptr()) };
+    unsafe { sk_engine_set_roots(engine, roots.as_ptr()) };
 
     // The watcher is started before the scan, so that the file created
     // below is caught either way.
-    assert_eq!(fl_engine_start_watch(engine), 0);
+    assert_eq!(sk_engine_start_watch(engine), 0);
 
-    fl_engine_start_scan(engine);
-    while fl_engine_scan_finished(engine) == 0 {
+    sk_engine_start_scan(engine);
+    while sk_engine_scan_finished(engine) == 0 {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let initial = fl_engine_finish_scan(engine);
+    let initial = sk_engine_finish_scan(engine);
     assert!(initial >= 0);
 
     // A file is created after the scan has finished.
@@ -42,7 +42,7 @@ fn the_watcher_reports_new_files() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !saw_new_file {
         let found = unsafe {
-            fl_engine_poll_changes(engine, buffer.as_mut_ptr(), buffer.len() as i32)
+            sk_engine_poll_changes(engine, buffer.as_mut_ptr(), buffer.len() as i32)
         };
         assert!(found >= 0);
 
@@ -77,6 +77,6 @@ fn the_watcher_reports_new_files() {
         "the watcher did not report the file that was created"
     );
 
-    unsafe { fl_engine_free(engine) };
+    unsafe { sk_engine_free(engine) };
     let _ = std::fs::remove_dir_all(&root);
 }

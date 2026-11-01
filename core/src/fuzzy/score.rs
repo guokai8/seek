@@ -117,6 +117,19 @@ impl Scheme {
             Scheme::Path => CharClass::Delimiter,
         }
     }
+
+    /// The tiebreak chain fzf uses with this scheme.
+    ///
+    /// fzf's `--scheme` changes more than the scoring: `--scheme=path` also
+    /// sets `--tiebreak=pathname,length`. The chain belongs to the scheme
+    /// for that reason — choosing one and leaving the other behind gives an
+    /// ordering that is neither of fzf's.
+    pub fn criteria(&self) -> &'static [crate::fuzzy::Criterion] {
+        match self {
+            Scheme::Default => crate::fuzzy::DEFAULT_CRITERIA,
+            Scheme::Path => crate::fuzzy::PATH_CRITERIA,
+        }
+    }
 }
 
 /// Character classification tables, precomputed for a given scheme.
@@ -125,6 +138,21 @@ pub struct CharClasses {
     delimiters: &'static [u8],
     bonus_matrix: [[i16; CHAR_NUMBER + 1]; CHAR_NUMBER + 1],
     initial_char_class: CharClass,
+    /// The bonus for the character that opens the haystack.
+    ///
+    /// fzf's `bonusAt` pays this at index 0 whatever the character there
+    /// is, which is not the same as `bonus_for(White, class)` for every
+    /// class. See [`crate::fuzzy::exact::ExactMatcher`], which is the only
+    /// caller: the fuzzy matcher reaches the same bonus through the
+    /// matrix, from the scheme's initial class.
+    bonus_boundary_white: i16,
+    /// The largest bonus any class transition under this scheme pays.
+    ///
+    /// Taken from the matrix rather than written down, so that it cannot
+    /// drift away from the bonuses actually in use. It is what bounds the
+    /// best score a pattern can reach; see
+    /// [`crate::fuzzy::FuzzyMatcher::score_ceiling`].
+    max_bonus: i16,
 }
 
 impl CharClasses {
@@ -158,11 +186,20 @@ impl CharClasses {
             }
         }
 
+        let max_bonus = bonus_matrix
+            .iter()
+            .flat_map(|row| row.iter())
+            .copied()
+            .max()
+            .unwrap_or(0);
+
         Self {
             ascii,
             delimiters,
             bonus_matrix,
             initial_char_class: scheme.initial_char_class(),
+            bonus_boundary_white: scheme.bonus_boundary_white(),
+            max_bonus,
         }
     }
 
@@ -197,6 +234,16 @@ impl CharClasses {
         } else {
             CharClass::NonWord
         }
+    }
+
+    /// The bonus for the character that opens the haystack.
+    pub fn bonus_boundary_white(&self) -> i16 {
+        self.bonus_boundary_white
+    }
+
+    /// The largest bonus this scheme pays for any class transition.
+    pub fn max_bonus(&self) -> i16 {
+        self.max_bonus
     }
 
     /// Bonus for transitioning from `prev_class` to `class`.

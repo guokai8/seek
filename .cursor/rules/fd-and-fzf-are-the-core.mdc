@@ -1,0 +1,112 @@
+---
+description: The core of this project is fd and fzf. The UI is the shell.
+alwaysApply: true
+---
+
+# seek: fd and fzf are the core
+
+This app exists to put `fd`'s traversal and `fzf`'s matching and ranking
+behind a native macOS panel. The Rust core **is** the product. The SwiftUI
+front end is the delivery mechanism.
+
+## The rule
+
+**fd and fzf are the core. The UI is the shell.**
+
+Every change is judged against one question: *does this make the app behave
+more like `fd`/`fzf`, or less?* A prettier panel that searches worse is a
+regression, not an improvement.
+
+## What this means concretely
+
+### 1. fzf's ranking is the contract
+
+If the ordering differs from what the real `fzf` binary produces, that is a
+**bug, not a design choice**. Never "improve" the ranking, never reorder
+results by recency or by file type, never add a relevance heuristic of your
+own. `fzf`'s tiebreak chain is: score → length → chunk → pathname → begin →
+end. Reproduce it exactly.
+
+The matcher is a port of fzf's `FuzzyMatchV2` — the dynamic-programming
+score matrix, the character classification, the bonus matrix, the accent
+folding. Do not swap it for a library, and do not approximate it.
+
+**Verify any change to the matcher or the ranking against the real binary:**
+
+```sh
+cd core && cargo test --test fzf_parity -- --ignored --nocapture
+```
+
+This is a differential test that compares match sets, scores, and the full
+ranking order against `fzf --filter`. It must pass before any matcher change
+is considered done. If `fzf` is not on `PATH`, the test skips — that is not
+a pass, it is a skipped test, and the change is unverified.
+
+### 2. fd's traversal is the contract
+
+The walk uses the `ignore` crate's parallel walker, the same way `fd` does:
+
+- `.gitignore`, `.ignore`, and `.fdignore` are honoured.
+- Hidden files are skipped.
+- Exclusions use fd's `!pattern` convention.
+- The path shown to the user is the path **relative to the indexed root** —
+  the same thing `fd` prints when it is given a root. The root's prefix is
+  the same for every entry under it and carries no information.
+
+Do not "improve" the traversal with your own heuristics. If `fd` skips
+something, seek skips it. If `fd` shows something, seek shows it.
+
+### 3. The search covers the whole path
+
+fzf matches against the whole path, not just the file name, so seek does
+too. The path-aware scoring scheme only means something because the haystack
+contains the separators.
+
+Do not narrow the haystack to the file name. A search that cannot find what
+it displays is a search that lies.
+
+### 4. The query language is fzf's
+
+`foo` fuzzy, `'foo'` exact, `^foo` prefix, `foo$` suffix, `!foo` exclude,
+space-separated terms that must all match. These are fzf's operators with
+fzf's meanings. Do not invent new ones, and do not change what an existing
+one does.
+
+## Priorities, in order
+
+1. **Correctness of the core.** Matching, ranking, traversal, the index.
+2. **The panel works.** Typing produces results; results are visible and
+   ranked; opening one opens the right file.
+3. **Performance.** A keystroke must be answered in milliseconds.
+4. **Appearance.** Last.
+
+An item lower in the list may never be traded for one above it. A slow
+search is worse than an ugly panel, and an ugly panel is worse than a slow
+one only if the slow one is not slow.
+
+## Things that are *not* improvements
+
+- Reordering results away from fzf's order ("more recent first", "folders
+  before files").
+- Adding a ranking signal the user did not ask for.
+- Hiding results that fzf would show.
+- Defaulting the scope to somewhere other than what the user configured.
+- Silently truncating or filtering the result set.
+- Changing the matcher's scoring to make some query "look better".
+
+## Where things live
+
+| concern | file |
+| --- | --- |
+| fzf port: scoring, bonus matrix, normalisation | `core/src/fuzzy/` |
+| ranking and the tiebreak chain | `core/src/fuzzy/rank.rs` |
+| fd-style parallel walk | `core/src/scan.rs` |
+| query parsing (fzf's operators) | `core/src/query.rs` |
+| the searchable haystack | `core/src/corpus.rs` |
+| the parallel search | `core/src/search.rs` |
+
+## Evidence
+
+- `core/tests/fzf_parity.rs` — differential test against the real `fzf`.
+- `core/tests/path_matching.rs` — the search covers the whole path.
+- `core/examples/bench.rs` — latency against the real `fzf`.

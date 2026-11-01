@@ -1,12 +1,12 @@
 [package]
-name = "fuzzylite-core"
+name = "seek-core"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight macOS file search engine: fd-style traversal + fzf-style fuzzy matching"
 license = "MIT"
 
 [lib]
-name = "fuzzylite_core"
+name = "seek_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]

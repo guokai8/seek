@@ -5,15 +5,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>Fuzzylite</string>
+	<string>Seek</string>
+	<key>CFBundleIconFile</key>
+	<string>Seek</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.fuzzylite.app</string>
+	<string>dev.seek.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Fuzzylite</string>
+	<string>Seek</string>
 	<key>CFBundleDisplayName</key>
-	<string>Fuzzylite</string>
+	<string>Seek</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -25,7 +27,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>fuzzylite — fd-style traversal with fzf-style matching</string>
+	<string>seek — fd-style traversal with fzf-style matching</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
