@@ -277,43 +277,53 @@ struct ContentView: View {
         model.isPreviewShown ? model.selectedHit : nil
     }
 
-    /// What the panel shows when nothing matched.
+    /// What the panel has to say when there are no rows, if anything.
     ///
-    /// An empty state that teaches the interface, rather than a blank
-    /// rectangle that leaves the user guessing whether the query or the
-    /// index is at fault.
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if model.query.isEmpty {
-                EmptyState(
-                    icon: "text.cursor",
-                    title: "Type to search",
-                    detail: "Fuzzy matching over the whole path, ranked like fzf. "
-                        + "Use *.pdf for a glob, re: for a regular expression."
-                )
-            } else if let reason = model.queryError {
-                EmptyState(
-                    icon: "exclamationmark.triangle",
-                    title: "That query cannot be read",
-                    detail: reason
-                )
-            } else if model.isIndexing {
-                EmptyState(
-                    icon: "arrow.triangle.2.circlepath",
-                    title: "Building the index",
-                    detail: "The first search runs as soon as the index is ready."
-                )
-            } else {
-                EmptyState(
-                    icon: "magnifyingglass",
-                    title: "No matches for “\(model.query)”",
-                    detail: "The search covers the whole path, not just the name. Try a shorter term, or quote it for an exact match."
-                )
-            }
+    /// An empty query says nothing at all. The panel opens focused with
+    /// its placeholder already in the field, so a block of prose beneath
+    /// it only repeated what the field had just said, and it was the one
+    /// empty state that showed up every single time the panel was
+    /// summoned rather than when something needed explaining.
+    ///
+    /// The other three earn the room: each one answers "why is this list
+    /// empty", which a blank rectangle leaves the user guessing at.
+    private var emptyMessage: (icon: String, title: String, detail: String)? {
+        if let reason = model.queryError {
+            return ("exclamationmark.triangle", "That query cannot be read", reason)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.gutter + 6)
-        .padding(.vertical, 26)
+
+        if model.isIndexing {
+            return (
+                "arrow.triangle.2.circlepath", "Building the index",
+                "The first search runs as soon as the index is ready."
+            )
+        }
+
+        if model.query.isEmpty {
+            return nil
+        }
+
+        return (
+            "magnifyingglass", "No matches for \u{201C}\(model.query)\u{201D}",
+            "The search covers the whole path, not just the name. "
+                + "Try a shorter term, or quote it for an exact match."
+        )
+    }
+
+    /// The message, laid out -- or nothing, taking no room at all.
+    ///
+    /// The padding belongs here rather than around the whole thing,
+    /// because an empty container still obeys its padding: wrapped the
+    /// other way round, an empty query left 52pt of blank panel behind
+    /// where the prose used to be.
+    @ViewBuilder
+    private var emptyState: some View {
+        if let message = emptyMessage {
+            EmptyState(icon: message.icon, title: message.title, detail: message.detail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Theme.gutter + 6)
+                .padding(.vertical, 26)
+        }
     }
 
     // MARK: - Footer

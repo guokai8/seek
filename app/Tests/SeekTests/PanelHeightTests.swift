@@ -95,8 +95,10 @@ final class PanelHeightTests: XCTestCase {
     func test_the_empty_state_does_not_fill_the_panel() {
         let short = height(of: AppModel())
 
-        // An empty state in a full-height box is mostly box. Half the
-        // ceiling is a generous bound: the hint is three lines of text.
+        // An empty panel in a full-height box is mostly box. Half the
+        // ceiling is a generous bound: an empty query draws no message at
+        // all now, so this is the search bar and the footer and nothing
+        // else between them.
         XCTAssertLessThan(
             short,
             Theme.panelMaxHeight / 2,
