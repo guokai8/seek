@@ -226,6 +226,21 @@ The Rust core needs a stable toolchain; the app needs Xcode.
 `build.sh` relinks the app after the core is rebuilt, because SwiftPM does
 not notice when a static library changes.
 
+`build.sh` builds for the machine it runs on, because that is the one you
+wait for on every change. `bundle.sh` is the one that ships, so it builds
+**universal** — `arm64` and `x86_64`, both for **macOS 14 and later**. It
+builds the core once per target, joins the two static libraries with `lipo`,
+and hands the universal archive to a single `swift build --arch arm64 --arch
+x86_64`. Afterwards it asks the binary what it is: a missing slice or a slice
+built for the wrong minimum fails the build, because either one looks like a
+working build right up until the app is copied to the other kind of Mac.
+
+The Intel target has to be installed once:
+
+```sh
+rustup target add x86_64-apple-darwin
+```
+
 ## Usage
 
 | key | action |

@@ -2755,6 +2755,23 @@ private let overheadFloor: TimeInterval = 0.008   // 引擎哪天快到不值得
 - 前后两张 `--snapshot=` 对照看过
 
 
+## 第 34 步：通用二进制（arm64 + x86_64，macOS 14 起）
+
+出的包一直只有 arm64 一个 slice。改掉：`bundle.sh` 现在给两个 target 各编一次
+核心，用 `lipo` 把两个静态库合成一个通用归档，再交给一次
+`swift build --arch arm64 --arch x86_64`。`build.sh` 不动 —— 那是每次改完都要等的
+那一个，还是只编本机。
+
+最后一段是**问二进制它自己是什么**：缺一个 slice、或者某个 slice 的最低版本不对，
+都会让构建失败。这两种情况都长得和构建成功一模一样，直到包被拷到另一种 Mac 上。
+最低版本要逐 slice 查（`otool -arch`），因为 `MACOSX_DEPLOYMENT_TARGET` 只保证得了
+本机编的那一个。
+
+验证不止看元数据：x86_64 那个 slice 用 `arch -x86_64` 真跑了一遍 smoke test，绿。
+
+需要一次性装好 Intel target：`rustup target add x86_64-apple-darwin`。
+
+
 ## 六、下一步的优先级（按 `fd-and-fzf-are-the-core` 规则）
 
 1. ~~**确认面板真的显示结果**~~ —— 第 9 步已修复并有测试守着
