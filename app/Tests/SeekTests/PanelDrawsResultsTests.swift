@@ -191,8 +191,17 @@ final class PanelDrawsResultsTests: XCTestCase {
 
         // The empty state is a heading and a line of advice. A drawn list
         // is a screenful of rows, several times as many.
+        //
+        // Twice, not three times: these are bands of text counted off a
+        // bitmap, and the bottom row of a full list is clipped by the
+        // viewport, so the count moves by one between runs. Against a
+        // five-band empty state, three times over put the bar at 15 and
+        // the measurement at 15 or 16 -- a bar inside the noise. What
+        // this assertion is for is a list that drew its empty state
+        // instead of its rows, which lands at five, nowhere near ten.
+        // The screenful itself is pinned by the absolute count below.
         XCTAssertGreaterThan(
-            rows, emptyRows * 3,
+            rows, emptyRows * 2,
             "the list drew \(rows) rows of text against \(emptyRows) for an empty panel"
         )
 

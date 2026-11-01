@@ -57,7 +57,17 @@ final class KeystrokeBudgetTests: XCTestCase {
     private let overheadFloor: TimeInterval = 0.008
 
     /// A loose ceiling, to catch the case where the engine itself regresses.
-    private let absoluteCeiling: TimeInterval = 0.150
+    ///
+    /// Loose is the point. The worst keystroke is the first character
+    /// against the whole index, and that one is almost entirely the
+    /// engine: measured here it costs about 130ms of which the panel adds
+    /// 6-11ms. A ceiling near that measurement therefore does not police
+    /// the panel at all -- it polices the machine, and fails on a loaded
+    /// one for no reason. The assertion below is the one with teeth,
+    /// because it compares the panel against the engine and so does not
+    /// move when both get slower together. An engine regression worth a
+    /// failure is a multiple, not a fifth.
+    private let absoluteCeiling: TimeInterval = 0.300
 
     /// Someone typing `readme`, one character at a time.
     private let keystrokes = ["r", "re", "rea", "read", "readm", "readme"]

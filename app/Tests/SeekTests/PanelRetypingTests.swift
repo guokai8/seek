@@ -6,10 +6,10 @@ import XCTest
 
 /// Typing into the panel the way a person does.
 ///
-/// Every other test here sets `model.query` directly, which skips the
-/// search field, the binding and the panel's own key monitor. This one
-/// posts real key events and drains the event queue, so a key reaches the
-/// model by the same route it does in the app.
+/// Most of the tests here set `model.query` directly, which skips the
+/// search field and its binding entirely. This one sends real key events
+/// to the panel, so each character goes through the field, its field
+/// editor and the binding before it reaches the model.
 ///
 /// The sequence is the one that was reported as broken: type a word, see
 /// results, delete the whole thing, then type something else. It passed
@@ -43,7 +43,6 @@ final class PanelRetypingTests: XCTestCase {
 
     /// Presses a key, and lets the app see it.
     private func press(_ chars: String, _ keyCode: UInt16, on panel: NSPanel) async throws {
-        let app = NSApplication.shared
         let event = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
@@ -57,16 +56,27 @@ final class PanelRetypingTests: XCTestCase {
             keyCode: keyCode
         )!
 
-        app.postEvent(event, atStart: false)
-
-        // XCTest never calls `NSApp.run`, so nothing drains the queue.
-        // Draining it here is what makes the key monitor and the search
-        // field see the key as they do in the app.
-        while let queued = app.nextEvent(
-            matching: .any, until: Date(), inMode: .default, dequeue: true
-        ) {
-            app.sendEvent(queued)
-        }
+        // Handed straight to the panel, the way the other typing tests do
+        // it, rather than posted to `NSApp` and drained off its queue.
+        //
+        // That queue belongs to the process and not to this test: the other
+        // typing tests leave their own key events on it, and draining it
+        // delivered those into this panel too, which is how a typed "human"
+        // came back as "Shuemuarn" with a stray "s" and "e" threaded
+        // through it. Clearing it first and then filtering what came back
+        // out both failed, for the same underlying reason -- whether
+        // `NSApp.sendEvent` reaches a panel that the window server has not
+        // made key is not something this test can know, so a key was
+        // either dropped or delivered twice ("hhuummaann").
+        //
+        // Nothing is lost by not going through `NSApp`. The app's own key
+        // monitor is installed by the delegate, and this test builds its
+        // panel itself, so the monitor was never in this path to begin
+        // with -- it is covered by `AppDelegateIntegrationTests`, which
+        // runs the real delegate. What is particular to this test is the
+        // order the keys come in: a word, the whole word deleted, then a
+        // fresh one, which is the sequence that was reported as broken.
+        panel.sendEvent(event)
 
         try await Task.sleep(for: .milliseconds(120))
     }
