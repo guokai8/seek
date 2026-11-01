@@ -276,6 +276,8 @@ or with the gear button in the bottom right of the panel.
 | Matching | exact or fuzzy, case sensitivity, accent folding, and the scoring scheme |
 | Hide after | how long the panel stays open when it is left alone. `Never` keeps it open until it is closed by hand. |
 | Show the preview column | whether the panel opens with the preview showing. `Tab` toggles it without coming here. |
+| Show when a file last changed | the date at the right-hand end of each row. Today's files show the time, this year's the day and month, older ones the year as well. |
+| Show the file size | the size at the right-hand end of each row. Folders show none: a folder's `st_size` is the size of its own on-disk record, the same for a folder of one file and a folder of ten thousand. |
 
 ### The preview column
 
@@ -476,6 +478,7 @@ app/Sources/Seek/
   SeekApp.swift          the app, the panel, the hotkey, the menu bar item
   ContentView.swift      the panel's layout
   ResultRow.swift        a result, with the match highlighted
+  ResultMetadataFormat.swift  how a row writes a size and a date
   Theme.swift            the colours, the type scale and the shapes
   AppModel.swift         the state and the background work
   SearchEngine.swift     the Swift wrapper around the C ABI
