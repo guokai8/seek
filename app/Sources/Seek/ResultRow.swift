@@ -22,17 +22,46 @@ struct ResultRow: View {
     /// Whether to show how big the entry is.
     let showsSize: Bool
 
+    /// Whether this row's name is being edited.
+    ///
+    /// This and the two closures below have defaults, because renaming is
+    /// something a row can be asked to do rather than part of what a row
+    /// is: the tests that draw a row to check a highlight or a metadata
+    /// column have nothing to say about it. The one place that draws the
+    /// real list passes all three.
+    var isRenaming: Bool = false
+
+    /// Called with the new name when the edit is committed.
+    var onRename: (String) -> Void = { _ in }
+
+    /// Called when the edit is abandoned.
+    var onCancelRename: () -> Void = {}
+
+    /// The name being typed, while the row is in its editing state.
+    @State private var draft: String = ""
+
+    /// The focus of the rename field.
+    ///
+    /// SwiftUI gives a newly inserted `TextField` the focus only if it is
+    /// asked for, and a rename field that has to be clicked before it can
+    /// be typed into is a rename field nobody uses.
+    @FocusState private var isEditing: Bool
+
     var body: some View {
         HStack(spacing: 9) {
             icon
                 .frame(width: 16)
 
-            Text(highlightedName)
-                .font(isSelected ? .resultNameSelected : .resultName)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .layoutPriority(1)
+            if isRenaming {
+                renameField
+            } else {
+                Text(highlightedName)
+                    .font(isSelected ? .resultNameSelected : .resultName)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+            }
 
             if !hit.directory.isEmpty {
                 // The directory is separated from the name by a hairline
@@ -85,6 +114,43 @@ struct ResultRow: View {
             .foregroundStyle(Theme.tertiary)
             .lineLimit(1)
         }
+    }
+
+    /// The name, as a field to type a new one into.
+    ///
+    /// Only the name: the folder it is in is not editable, because the
+    /// panel renames and does not move. `AppModel.rename` refuses a name
+    /// carrying a separator, so a path typed in here is turned away
+    /// rather than quietly becoming a move.
+    private var renameField: some View {
+        TextField("", text: $draft)
+            .textFieldStyle(.plain)
+            .font(.resultName)
+            .foregroundStyle(.primary)
+            .focused($isEditing)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Theme.well)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Theme.accent.opacity(0.6), lineWidth: 1)
+                    )
+            )
+            .frame(maxWidth: 320)
+            .layoutPriority(1)
+            .onAppear {
+                draft = hit.name
+                isEditing = true
+            }
+            .onSubmit { onRename(draft) }
+            .onChange(of: isEditing) { _, focused in
+                // Clicking away from the field abandons the edit. The
+                // alternative -- committing it -- renames a file because
+                // the user looked somewhere else.
+                if !focused { onCancelRename() }
+            }
     }
 
     /// The icon that tells a folder from a file.

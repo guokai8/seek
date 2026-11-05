@@ -20,6 +20,11 @@ final class AppModel: ObservableObject {
     @Published var query: String = "" {
         didSet {
             if query != oldValue {
+                // The row being renamed is about to be replaced by the
+                // next query's rows, and a field left open over a row
+                // that no longer means the same file would rename the
+                // wrong one.
+                cancelRename()
                 scheduleSearch()
             }
         }
@@ -100,6 +105,16 @@ final class AppModel: ObservableObject {
     /// A short status message shown in the footer.
     @Published private(set) var status: String = ""
 
+    /// The entry id of the row whose name is being edited, if any.
+    ///
+    /// By id rather than by index: the list is rebuilt under the user on
+    /// every keystroke and after every watcher batch, and an index would
+    /// quietly come to mean a different file.
+    @Published private(set) var renamingID: UInt32?
+
+    /// Whether a row is being renamed.
+    var isRenaming: Bool { renamingID != nil }
+
     /// The engine that owns the Rust-side index.
     ///
     /// The engine is thread-safe, so it is not isolated to the main actor.
@@ -178,6 +193,13 @@ final class AppModel: ObservableObject {
     /// Whether a result row says how big the entry is.
     @Published private(set) var showsSize: Bool = Preferences.shared.showSize
 
+    /// How opaque the panel is drawn, already clamped.
+    ///
+    /// The app delegate owns the window and watches this, so that moving
+    /// the slider shows its effect on the panel standing behind the
+    /// settings window rather than the next time the panel is summoned.
+    @Published private(set) var panelOpacity: Double = Preferences.shared.effectiveOpacity
+
     /// Whether the preview column is drawn.
     ///
     /// Asking for the preview is not the same as having something to
@@ -243,6 +265,12 @@ final class AppModel: ObservableObject {
 
                     if size != self.showsSize {
                         self.showsSize = size
+                    }
+
+                    let opacity = Preferences.shared.effectiveOpacity
+
+                    if opacity != self.panelOpacity {
+                        self.panelOpacity = opacity
                     }
 
                     // Both ways in lead here: the checkbox writes the
@@ -1033,6 +1061,136 @@ final class AppModel: ObservableObject {
     func copyPath(_ hit: SearchHit) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(hit.path, forType: .string)
+    }
+
+    // MARK: - Renaming a row
+
+    /// What the panel should do with a key while a row is being renamed.
+    enum RenameKey {
+        /// No rename is in progress; the panel handles the key as usual.
+        case notRenaming
+        /// The key abandoned the rename, and nothing else should happen.
+        case cancelled
+        /// The key belongs to the rename field; the panel must not take it.
+        case passThrough
+    }
+
+    /// Decides a key press while a row is being renamed.
+    ///
+    /// The panel's local monitor sees every key before the views do, and
+    /// it maps Return to "open the selected file" and Escape to "hide the
+    /// panel". Over a rename field both are wrong, so the monitor asks
+    /// here first and stands aside for everything but Escape.
+    func keyWhileRenaming(_ event: NSEvent) -> RenameKey {
+        guard isRenaming else { return .notRenaming }
+
+        if event.keyCode == 53 { // Escape
+            cancelRename()
+            return .cancelled
+        }
+
+        return .passThrough
+    }
+
+    /// Puts a row into its editing state.
+    func beginRename(_ hit: SearchHit) {
+        renamingID = hit.id
+    }
+
+    /// Leaves the editing state without renaming anything.
+    func cancelRename() {
+        renamingID = nil
+    }
+
+    /// Renames the row and leaves the editing state either way.
+    ///
+    /// The field closes on a refusal as well as on a success. The reason
+    /// goes to the footer, and a field that stayed open would be a second
+    /// place saying the same thing.
+    func commitRename(_ hit: SearchHit, to name: String) {
+        renamingID = nil
+        rename(hit, to: name)
+    }
+
+    // MARK: - Writing to the filesystem
+
+    /// Moves a result to the Trash.
+    ///
+    /// The Trash, not `removeItem`. This is a launcher that is opened a
+    /// hundred times a day and the row under the pointer is whichever one
+    /// the last keystroke ranked first, so the destructive action has to
+    /// be the one the user can take back.
+    ///
+    /// The row goes away on its own: the watcher sees the file leave and
+    /// the index drops it. Taking it out of `results` here as well would
+    /// mean two sources deciding what the list holds.
+    @discardableResult
+    func trash(_ hit: SearchHit) -> Bool {
+        do {
+            try FileManager.default.trashItem(
+                at: URL(fileURLWithPath: hit.path),
+                resultingItemURL: nil
+            )
+            status = "Moved \(hit.name) to the Trash"
+            return true
+        } catch {
+            status = "Could not move \(hit.name) to the Trash"
+            NSLog("seek: could not trash \(hit.path): \(error)")
+            return false
+        }
+    }
+
+    /// Renames a result, in the folder it is already in.
+    ///
+    /// `name` is a name and never a path. `moveItem` would just as
+    /// happily move the file somewhere else, so a name carrying a
+    /// separator -- or `..` -- would turn renaming into moving, and the
+    /// panel does not offer moving. Those are refused rather than
+    /// sanitised: silently renaming `../x` to `x` is a different
+    /// operation from the one that was asked for.
+    ///
+    /// Returns false and says why in the status when the name cannot be
+    /// used. The file is left alone in every one of those cases.
+    @discardableResult
+    func rename(_ hit: SearchHit, to name: String) -> Bool {
+        let wanted = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !wanted.isEmpty else {
+            status = "A file needs a name"
+            return false
+        }
+        guard !wanted.contains("/"), wanted != ".", wanted != ".." else {
+            status = "A name cannot contain a slash"
+            return false
+        }
+        guard wanted != hit.name else {
+            // Not a failure the user needs telling about -- they typed
+            // the name it already had -- but not a rename either.
+            return false
+        }
+
+        let source = URL(fileURLWithPath: hit.path)
+        let target = source.deletingLastPathComponent().appendingPathComponent(wanted)
+
+        // Checked rather than left to `moveItem`, which on a
+        // case-insensitive volume would also refuse a rename that only
+        // changes case -- the one rename most worth allowing.
+        if FileManager.default.fileExists(atPath: target.path),
+            target.path.compare(source.path, options: .caseInsensitive) != .orderedSame
+        {
+            status = "There is already something called \(wanted)"
+            return false
+        }
+
+        do {
+            try FileManager.default.moveItem(at: source, to: target)
+            status = "Renamed to \(wanted)"
+            return true
+        } catch {
+            status = "Could not rename \(hit.name)"
+            NSLog("seek: could not rename \(hit.path): \(error)")
+            return false
+        }
     }
 }
 

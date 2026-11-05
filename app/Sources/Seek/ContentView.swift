@@ -181,6 +181,11 @@ struct ContentView: View {
         )
         .padding(.horizontal, Theme.gutter)
         .padding(.vertical, 12)
+        // The strip around the search well is the panel's title bar: the
+        // one part of it that moves the window. It sits behind the well,
+        // so the field, the mode chip and the clear button go on taking
+        // their own clicks and only the margin around them drags.
+        .background(WindowDragArea())
     }
 
     // MARK: - Results
@@ -214,7 +219,10 @@ struct ContentView: View {
                                 hit: hit,
                                 isSelected: index == model.selection,
                                 showsModified: model.showsModified,
-                                showsSize: model.showsSize
+                                showsSize: model.showsSize,
+                                isRenaming: model.renamingID == hit.id,
+                                onRename: { model.commitRename(hit, to: $0) },
+                                onCancelRename: { model.cancelRename() }
                             )
                                 .padding(.horizontal, 8)
                                 .background(
@@ -226,8 +234,19 @@ struct ContentView: View {
                                         )
                                 )
                                 .contentShape(Rectangle())
+                                // The two-click gesture comes first:
+                                // declared the other way round, SwiftUI
+                                // matches the single tap and the second
+                                // click never forms a pair.
+                                .onTapGesture(count: 2) {
+                                    model.selection = index
+                                    model.open(hit)
+                                }
                                 .onTapGesture {
                                     model.selection = index
+                                }
+                                .contextMenu {
+                                    rowMenu(for: hit, at: index)
                                 }
                                 // Reaching the end of the list asks for
                                 // the next page. The trigger is a little
@@ -333,6 +352,27 @@ struct ContentView: View {
 
     // MARK: - Footer
 
+    /// The menu a right-click on a row opens.
+    ///
+    /// Every item acts on the row that was clicked rather than on the
+    /// selected one. A right-click does not move the selection, so acting
+    /// on the selection would mean the menu you opened over one row
+    /// trashing another.
+    @ViewBuilder
+    private func rowMenu(for hit: SearchHit, at index: Int) -> some View {
+        Button("Open") { model.open(hit) }
+        Button("Reveal in Finder") { model.reveal(hit) }
+        Button("Copy Path") { model.copyPath(hit) }
+
+        Divider()
+
+        Button("Rename\u{2026}") {
+            model.selection = index
+            model.beginRename(hit)
+        }
+        Button("Move to Trash") { model.trash(hit) }
+    }
+
     private var footer: some View {
         HStack(spacing: 14) {
             Text(model.status)
@@ -366,7 +406,7 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 5) {
-                    key("⌘⌥R")
+                    key("⌘↩")
                     Text("Reveal")
                         .font(.caption)
                         .foregroundStyle(Theme.secondary)

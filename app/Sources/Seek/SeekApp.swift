@@ -64,6 +64,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Keeps the menu bar icon in step with the index.
     private var indexingSubscription: AnyCancellable?
 
+    /// Keeps the panel's opacity in step with the setting.
+    ///
+    /// Watched rather than read when the panel opens: the settings window
+    /// is opened from the panel and the panel stays on screen behind it,
+    /// so a slider whose effect only appeared at the next summon would be
+    /// a slider the user cannot aim.
+    private var opacitySubscription: AnyCancellable?
+
     /// The event monitor that handles the panel's own keys.
     private var focusMonitor: Any?
 
@@ -380,6 +388,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     + "panelKey=\(String(describing: PanelKey.action(for: event)))"
             )
 
+            // A row being renamed owns the keyboard. The panel's own
+            // keys would otherwise open the file on Return and hide the
+            // whole panel on Escape, over a field the user is typing a
+            // name into.
+            switch self.model.keyWhileRenaming(event) {
+            case .cancelled:
+                self.resetIdleTimer()
+                return nil
+            case .passThrough:
+                self.resetIdleTimer()
+                return event
+            case .notRenaming:
+                break
+            }
+
             if event.keyCode == 53 { // Escape
                 self.hidePanel()
                 return nil
@@ -645,6 +668,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
+        panel.alphaValue = model.panelOpacity
+
+        // The panel is movable, but only by `WindowDragArea` -- the strip
+        // around the search well. `isMovableByWindowBackground` stays off
+        // for the reason above it: it would make the results list a drag
+        // handle too.
+        opacitySubscription = model.$panelOpacity
+            .receive(on: RunLoop.main)
+            .sink { [weak panel] opacity in
+                panel?.alphaValue = opacity
+            }
 
         return panel
     }

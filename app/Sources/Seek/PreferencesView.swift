@@ -75,6 +75,27 @@ final class Preferences: ObservableObject {
     /// Whether a result row says how big the entry is.
     @AppStorage("showSize") var showSize: Bool = true
 
+    /// How opaque the panel is, from `Preferences.minimumOpacity` to 1.
+    ///
+    /// The whole window, text included -- it is `alphaValue`, not a tint
+    /// behind the content. That is what makes the floor necessary: below
+    /// about 40% the result rows stop being readable, and a launcher
+    /// whose results cannot be read is a launcher that does nothing. The
+    /// setting is for seeing what is behind the panel, not for hiding it.
+    @AppStorage("panelOpacity") var panelOpacity: Double = 1.0
+
+    /// The lowest opacity the panel can be set to.
+    static let minimumOpacity: Double = 0.4
+
+    /// The stored opacity, clamped to what the panel may actually use.
+    ///
+    /// Clamped on the way out rather than on the way in, because the
+    /// value can also arrive from `defaults write` and from a settings
+    /// file carried over from another machine.
+    var effectiveOpacity: Double {
+        min(1.0, max(Self.minimumOpacity, panelOpacity))
+    }
+
     /// The global shortcut that summons the panel.
     var hotKey: HotKeyBinding {
         get {
@@ -336,6 +357,24 @@ struct PreferencesView: View {
 
             Toggle("Show the file size", isOn: $preferences.showSize)
                 .font(.system(size: 12))
+
+            HStack {
+                Text("Opacity")
+                    .font(.system(size: 12))
+
+                Slider(
+                    value: $preferences.panelOpacity,
+                    in: Preferences.minimumOpacity...1.0
+                )
+                .frame(width: 160)
+
+                Text("\(Int((preferences.effectiveOpacity * 100).rounded()))%")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+
+                Spacer()
+            }
 
             hint("Shown at the right-hand end of each row. Neither affects the ranking \u{2014} a result's place in the list is what it matched, never when it was written.")
         }
