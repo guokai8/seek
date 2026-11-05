@@ -64,8 +64,12 @@ enum PanelKey {
         let option = flags.contains(.option)
         let shift = flags.contains(.shift)
 
-        // Cmd+Opt+R reveals the result in Finder.
-        if command && option && event.keyCode == 15 {
+        // Cmd+Return reveals the result in Finder, next to the plain
+        // Return that opens it. The two live on one key because they are
+        // one thought -- "this row" -- and the modifier says where it
+        // goes. The old chord was Cmd+Opt+R, three keys away from the one
+        // the hand is already on.
+        if command && event.keyCode == 36 {
             return .reveal
         }
 

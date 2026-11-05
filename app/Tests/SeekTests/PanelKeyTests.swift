@@ -45,9 +45,18 @@ final class PanelKeyTests: XCTestCase {
 
     func test_the_chords_are_mapped() {
         XCTAssertEqual(
-            PanelKey.action(for: event(15, [.command, .option])),
+            PanelKey.action(for: event(36, [.command])),
             .reveal,
-            "Cmd+Opt+R should reveal"
+            "Cmd+Return should reveal"
+        )
+        XCTAssertNil(
+            PanelKey.action(for: event(15, [.command, .option])),
+            "Cmd+Opt+R was the old reveal chord and is gone"
+        )
+        XCTAssertEqual(
+            PanelKey.action(for: event(36)),
+            .open,
+            "Return on its own still opens -- the modifier is what tells them apart"
         )
         XCTAssertEqual(
             PanelKey.action(for: event(8, [.command, .shift])),

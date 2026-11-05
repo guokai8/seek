@@ -250,12 +250,23 @@ rustup target add x86_64-apple-darwin
 | `Home` `End` | jump to the first / last result |
 | `Return` | open the result |
 | `Tab` | show / hide the preview column |
+| `Cmd+Enter` | reveal the selected result in Finder |
 | `Cmd+E` | switch between exact and fuzzy matching |
-| `Cmd+Opt+R` | reveal the result in Finder |
 | `Cmd+Shift+C` | copy the path |
 | `Cmd+,` | open the settings |
 | `Cmd+Q` | quit |
-| `Esc` | close the panel |
+| `Esc` | close the panel (or abandon a rename) |
+
+A right-click on a result opens a menu: **Open**, **Reveal in Finder**,
+**Copy Path**, **Rename…**, **Move to Trash**. A double-click opens it.
+
+Renaming happens in the row. It renames and never moves: a name holding a
+`/` is refused rather than quietly turned into a move out of the folder
+you were looking at. Deleting is a move to the Trash, not an unlink.
+
+The strip around the search field is the panel's title bar — drag it to
+move the panel. The position is not remembered: the panel comes back
+centred on whichever screen the mouse is on, the way it always has.
 
 ### Settings
 
@@ -278,6 +289,7 @@ or with the gear button in the bottom right of the panel.
 | Show the preview column | whether the panel opens with the preview showing. `Tab` toggles it without coming here. |
 | Show when a file last changed | the date at the right-hand end of each row. Today's files show the time, this year's the day and month, older ones the year as well. |
 | Show the file size | the size at the right-hand end of each row. Folders show none: a folder's `st_size` is the size of its own on-disk record, the same for a folder of one file and a folder of ten thousand. |
+| Opacity | how see-through the panel is, from 40% to 100%. It fades the text along with the background, which is why it stops at 40%: below that the results stop being readable. |
 
 ### The preview column
 
@@ -479,6 +491,7 @@ app/Sources/Seek/
   ContentView.swift      the panel's layout
   ResultRow.swift        a result, with the match highlighted
   ResultMetadataFormat.swift  how a row writes a size and a date
+  WindowDragArea.swift   the strip of the panel that moves the window
   Theme.swift            the colours, the type scale and the shapes
   AppModel.swift         the state and the background work
   SearchEngine.swift     the Swift wrapper around the C ABI
