@@ -214,7 +214,10 @@ final class SelectAllTests: XCTestCase {
         chord("\u{1}", plain: "a", code: 0, in: panel)
         try await Task.sleep(for: .milliseconds(200))
 
-        let editor = field.currentEditor() as? NSText
+        // `currentEditor()` already hands back an `NSText?`, so there is
+        // nothing to cast. The cast that used to be here was a no-op the
+        // compiler warned about.
+        let editor = field.currentEditor()
         print("SELECT after-cmd-a range=\(String(describing: editor?.selectedRange))")
 
         XCTAssertEqual(
